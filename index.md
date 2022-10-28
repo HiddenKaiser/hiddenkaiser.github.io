@@ -2,9 +2,9 @@
 layout: default
 ---
 
-Text can be **bold**, _italic_, or ~~strikethrough~~.
+Hi my name is HiddenKaiser!
 
-[Link to another page](./another-page.html).
+I work at [Twin Atlas](https://twinatlas.com/).
 
 There should be whitespace between paragraphs.
 
