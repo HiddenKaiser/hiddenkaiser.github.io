@@ -288,6 +288,9 @@ section.block { padding: clamp(64px, 10vw, 128px) 0 0; }
 @keyframes drift { to { transform: translate(-80px, 60px) scale(1.15); } }
 .contact h2 { font-size: clamp(2.4rem, 7vw, 5.5rem); font-variation-settings: "wdth" 75; font-weight: 800; letter-spacing: -0.045em; line-height: .92; max-width: 13ch; }
 .contact p.sub { margin-top: 18px; color: #B7BDC8; max-width: 52ch; }
+.contact-head { display: flex; justify-content: space-between; align-items: flex-start; gap: clamp(20px, 4vw, 48px); }
+.contact-photo { flex: none; width: clamp(96px, 16vw, 180px); height: auto; aspect-ratio: 1; border-radius: 50%; object-fit: cover; border: 3px solid var(--accent); padding: 4px; background: var(--ink); box-shadow: 0 0 0 1px #2A303A, 0 20px 40px -16px color-mix(in srgb, var(--accent) 60%, transparent); }
+@media (max-width: 620px) { .contact-head { flex-direction: column-reverse; } }
 .contact-rows { margin-top: clamp(28px, 4vw, 44px); display: grid; border-top: 1px solid #2A303A; }
 .c-row { display: grid; grid-template-columns: 140px 1fr auto; gap: 16px; align-items: center; padding: 18px 0; border-bottom: 1px solid #2A303A; }
 .c-row .k { font-family: var(--mono); font-size: 12px; color: #9AA1AE; }
@@ -651,19 +654,14 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
 
   <div class="wrap">
     <section class="contact reveal" id="contact" aria-labelledby="contactTitle">
-      <h2 id="contactTitle">Hiring for pre-sales? Let's talk.</h2>
-      <p class="sub">Open to Sales Engineer, Solutions Engineer and Pre-Sales roles, remote across the US or around Philadelphia.</p>
+      <div class="contact-head">
+        <div>
+          <h2 id="contactTitle">Hiring for pre-sales? Let's talk.</h2>
+          <p class="sub">Open to Sales Engineer, Solutions Engineer and Pre-Sales roles, remote across the US or around Philadelphia.</p>
+        </div>
+        <img class="contact-photo" src="photo.jpg" alt="Jack Keuler" width="180" height="180">
+      </div>
       <div class="contact-rows">
-        <div class="c-row">
-          <span class="k">Email</span>
-          <a class="v" href="mailto:jackjkeuler@outlook.com">jackjkeuler@outlook.com</a>
-          <button class="c-btn" type="button" data-copy="jackjkeuler@outlook.com">Copy</button>
-        </div>
-        <div class="c-row">
-          <span class="k">Phone</span>
-          <a class="v" href="tel:+12676448723">+1 (267) 644-8723</a>
-          <button class="c-btn" type="button" data-copy="+1 (267) 644-8723">Copy</button>
-        </div>
         <div class="c-row">
           <span class="k">LinkedIn</span>
           <a class="v" href="https://www.linkedin.com/in/jackkeuler" target="_blank" rel="noopener">linkedin.com/in/jackkeuler</a>
