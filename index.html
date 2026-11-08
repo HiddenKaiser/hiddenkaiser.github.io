@@ -27,6 +27,7 @@
   --accent-deep: #C23A06;
   --accent-wash: #FFEDE5;
   --ok: #12A150;
+  --ok-deep: #0B7A3B;
 
   --display: "Bricolage Grotesque", "Arial Narrow", system-ui, sans-serif;
   --body: "Geist", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -96,10 +97,19 @@ button { font: inherit; color: inherit; }
   background: var(--ink); color: var(--paper); text-decoration: none; font-size: 14px; font-weight: 500;
   transition: transform .25s var(--ease), background .25s;
 }
-.nav-cta:hover { background: var(--accent); transform: translateY(-1px); }
+.nav-cta:hover { background: var(--accent-deep); transform: translateY(-1px); }
 .nav-cta svg { transition: transform .25s var(--ease); }
 .nav-cta:hover svg { transform: translateX(2px); }
 @media (max-width: 720px) { .nav-link.sec { display: none; } }
+.motion-btn {
+  display: inline-grid; place-items: center; width: 36px; height: 36px; border-radius: 999px; flex: none;
+  background: none; border: 1px solid var(--line); color: var(--ink); cursor: pointer; transition: background .2s, border-color .2s;
+}
+.motion-btn:hover { background: var(--surface); border-color: var(--ink); }
+.motion-btn .i-play { display: none; }
+.motion-btn[aria-pressed="true"] .i-play { display: block; }
+.motion-btn[aria-pressed="true"] .i-pause { display: none; }
+html.paused *, html.paused *::before, html.paused *::after { animation-play-state: paused !important; }
 
 /* ---------- Views ---------- */
 .view[hidden] { display: none; }
@@ -130,8 +140,8 @@ button { font: inherit; color: inherit; }
 .name {
   margin-top: 22px;
   font-size: var(--step-4);
-  font-variation-settings: "wdth" 75, "opsz" 96;
-  font-weight: 800; letter-spacing: -0.045em; line-height: .86;
+  font-variation-settings: "wdth" 90, "opsz" 48;
+  font-weight: 650; letter-spacing: -0.03em; line-height: .9;
 }
 .name .line { display: block; overflow: hidden; padding-bottom: .04em; }
 .name .line > span { display: inline-block; animation: rise 1s var(--ease) both; }
@@ -150,7 +160,7 @@ button { font: inherit; color: inherit; }
   transition: transform .25s var(--ease), background .25s, color .25s, border-color .25s, box-shadow .25s;
 }
 .btn-primary { background: var(--ink); color: var(--paper); }
-.btn-primary:hover { background: var(--accent); border-color: var(--accent); transform: translateY(-2px); box-shadow: 0 10px 24px -10px var(--accent); }
+.btn-primary:hover { background: var(--accent-deep); border-color: var(--accent-deep); transform: translateY(-2px); box-shadow: 0 10px 24px -10px var(--accent); }
 .btn-ghost { background: transparent; color: var(--ink); border-color: var(--line); }
 .btn-ghost:hover { border-color: var(--ink); background: var(--surface); transform: translateY(-2px); }
 .hero-meta { margin-top: 28px; display: flex; flex-wrap: wrap; gap: 8px 20px; font-family: var(--mono); font-size: var(--step--1); color: var(--muted); animation: fadeUp .9s .45s var(--ease) both; }
@@ -256,7 +266,7 @@ section.block { padding: clamp(64px, 10vw, 128px) 0 0; }
   display: grid; place-items: center; font-family: var(--mono); font-size: 13px; font-weight: 500;
   transition: background .3s, color .3s, transform .4s var(--ease), border-color .3s;
 }
-.step:hover .step-dot { background: var(--accent); border-color: var(--accent); color: #fff; transform: scale(1.12); }
+.step:hover .step-dot { background: var(--accent-deep); border-color: var(--accent-deep); color: #fff; transform: scale(1.12); }
 .step h3 { margin-top: 18px; font-size: 1.35rem; font-variation-settings: "wdth" 85; }
 .step p { margin-top: 8px; font-size: 14.5px; color: var(--muted); }
 .step .proof { margin-top: 12px; font-family: var(--mono); font-size: 11.5px; color: var(--accent-deep); line-height: 1.5; }
@@ -286,7 +296,7 @@ section.block { padding: clamp(64px, 10vw, 128px) 0 0; }
 .contact { margin: clamp(64px, 10vw, 128px) 0 0; background: var(--ink); color: var(--paper); border-radius: 22px; padding: clamp(28px, 6vw, 72px); position: relative; overflow: hidden; isolation: isolate; }
 .contact::before { content: ""; position: absolute; width: 520px; height: 520px; right: -140px; top: -200px; z-index: -1; border-radius: 50%; background: radial-gradient(circle, color-mix(in srgb, var(--accent) 55%, transparent), transparent 65%); filter: blur(10px); animation: drift 14s ease-in-out infinite alternate; }
 @keyframes drift { to { transform: translate(-80px, 60px) scale(1.15); } }
-.contact h2 { font-size: clamp(2.4rem, 7vw, 5.5rem); font-variation-settings: "wdth" 75; font-weight: 800; letter-spacing: -0.045em; line-height: .92; max-width: 13ch; }
+.contact h2 { font-size: clamp(2.4rem, 7vw, 5.5rem); font-variation-settings: "wdth" 90, "opsz" 48; font-weight: 650; letter-spacing: -0.03em; line-height: .95; max-width: 13ch; }
 .contact p.sub { margin-top: 18px; color: #B7BDC8; max-width: 52ch; }
 .contact-head { display: flex; justify-content: space-between; align-items: flex-start; gap: clamp(20px, 4vw, 48px); }
 .contact-photo { flex: none; width: clamp(96px, 16vw, 180px); height: auto; aspect-ratio: 1; border-radius: 50%; object-fit: cover; border: 3px solid var(--accent); padding: 4px; background: var(--ink); box-shadow: 0 0 0 1px #2A303A, 0 20px 40px -16px color-mix(in srgb, var(--accent) 60%, transparent); }
@@ -298,7 +308,7 @@ section.block { padding: clamp(64px, 10vw, 128px) 0 0; }
 .c-row a.v:hover { color: var(--accent); }
 .c-btn { background: transparent; border: 1px solid #2A303A; color: var(--paper); padding: 8px 14px; border-radius: 999px; cursor: pointer; font-size: 13px; transition: border-color .2s, background .2s; white-space: nowrap; }
 .c-btn:hover { border-color: var(--paper); }
-.c-btn.done { background: var(--ok); border-color: var(--ok); }
+.c-btn.done { background: var(--ok-deep); border-color: var(--ok-deep); }
 @media (max-width: 620px) { .c-row { grid-template-columns: 1fr auto; } .c-row .k { grid-column: 1 / -1; } }
 
 footer { padding: 36px 0 44px; color: var(--muted); font-size: 13px; }
@@ -310,7 +320,7 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
 
 /* ---------- Resume view ---------- */
 .r-top { padding: clamp(36px, 6vw, 72px) 0 24px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: end; gap: 20px; }
-.r-top h1 { font-size: clamp(2.6rem, 7vw, 5rem); font-variation-settings: "wdth" 75; font-weight: 800; letter-spacing: -0.045em; line-height: .9; }
+.r-top h1 { font-size: clamp(2.6rem, 7vw, 5rem); font-variation-settings: "wdth" 90, "opsz" 48; font-weight: 650; letter-spacing: -0.03em; line-height: .95; }
 .r-top p { margin-top: 10px; color: var(--muted); }
 .r-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .r-status { font-family: var(--mono); font-size: 12px; color: var(--muted); min-height: 1.2em; margin-top: 8px; text-align: right; }
@@ -323,7 +333,7 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
 .tl-label { font-size: 13px; font-weight: 500; align-self: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 10px; }
 .tl-track { position: relative; height: 26px; background: var(--paper); border-radius: 6px; }
 .tl-bar { position: absolute; top: 3px; bottom: 3px; border-radius: 6px; background: var(--ink); transform-origin: left; animation: grow 1.2s var(--ease) both; display: flex; align-items: center; padding: 0 8px; color: var(--paper); font-family: var(--mono); font-size: 11px; white-space: nowrap; overflow: hidden; }
-.tl-bar.now { background: var(--accent); }
+.tl-bar.now { background: var(--accent-deep); }
 .tl-bar.part { background: repeating-linear-gradient(-45deg, #3A414D 0 5px, var(--ink) 5px 10px); }
 .tl-axis { grid-column: 2; position: relative; height: 18px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
 .tl-axis span { position: absolute; transform: translateX(-50%); }
@@ -379,6 +389,10 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
       <button class="nav-link sec" data-go="approach" type="button">Approach</button>
       <button class="nav-link sec" data-go="toolkit" type="button">Toolkit</button>
       <button class="nav-link sec" data-go="contact" type="button">Contact</button>
+      <button class="motion-btn" id="motionToggle" type="button" aria-pressed="false" aria-label="Pause animations" title="Pause animations">
+        <svg class="i-pause" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3" width="3" height="10" rx="1" fill="currentColor"/><rect x="9.5" y="3" width="3" height="10" rx="1" fill="currentColor"/></svg>
+        <svg class="i-play" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.2v9.6c0 .5.6.8 1 .5l7-4.8c.4-.3.4-.8 0-1L6 2.7c-.4-.3-1 0-1 .5z" fill="currentColor"/></svg>
+      </button>
       <a class="nav-cta" id="navSwitch" href="#resume">
         <span id="navSwitchLabel">Resume</span>
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -446,8 +460,8 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
     </div>
   </section>
 
-  <div class="band" aria-label="Tools and platforms">
-    <div class="marquee" aria-hidden="true">
+  <div class="band" aria-hidden="true">
+    <div class="marquee">
       <ul>
         <li>Technical Discovery</li><li>Product Demos</li><li>Proofs of Concept</li><li>AWS</li><li>REST APIs</li><li>Webhooks</li><li>Stripe</li><li>OpenAI API</li><li>LangChain</li><li>AI Agents</li><li>TypeScript</li><li>Python</li><li>Docker</li><li>GitHub Actions</li><li>Contract Negotiation</li>
       </ul>
@@ -508,7 +522,7 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
               <div><b>22.3M+</b><span>requests per hour</span></div>
               <div><b>0 → 1</b><span>founded, sold, scaled</span></div>
             </div>
-            <div class="share" aria-label="Target-market share between 60 and 75 percent">
+            <div class="share" role="group" aria-label="Target-market share between 60 and 75 percent">
               <div class="share-top"><span>Target-market share</span><span>60–75%</span></div>
               <div class="share-bar"><i class="hi"></i><i class="lo"></i></div>
               <p class="share-legend">Solid bar: lower estimate. Hatched: upper estimate.</p>
@@ -718,8 +732,6 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
         </div>
         <div class="sheet-contact">
           <span>Philadelphia, PA · Remote, USA</span>
-          <a href="tel:+12676448723">+1 (267) 644-8723</a>
-          <a href="mailto:jackjkeuler@outlook.com">jackjkeuler@outlook.com</a>
           <a href="https://www.linkedin.com/in/jackkeuler" target="_blank" rel="noopener">linkedin.com/in/jackkeuler</a>
         </div>
       </header>
@@ -807,6 +819,8 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
   </div>
 </main>
 
+<p class="sr" role="status" id="liveMsg"></p>
+
 <footer>
   <div class="wrap">
     <span>© 2026 Jack Keuler</span>
@@ -817,6 +831,20 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
 <script>
 (function () {
   var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var paused = false;
+  try { paused = localStorage.getItem('paused') === '1'; } catch (e) {}
+  var motionBtn = document.getElementById('motionToggle');
+  function applyPaused() {
+    document.documentElement.classList.toggle('paused', paused);
+    motionBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+    var label = paused ? 'Play animations' : 'Pause animations';
+    motionBtn.setAttribute('aria-label', label); motionBtn.title = label;
+  }
+  motionBtn.addEventListener('click', function () {
+    paused = !paused; applyPaused();
+    try { localStorage.setItem('paused', paused ? '1' : '0'); } catch (e) {}
+  });
+  applyPaused();
   var home = document.getElementById('view-home');
   var resume = document.getElementById('view-resume');
   var navSwitch = document.getElementById('navSwitch');
@@ -870,6 +898,7 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
   /* ---------- Role cycler ---------- */
   var roles = document.querySelectorAll('#cycler > span'); var ri = 0;
   if (!reduce) setInterval(function () {
+    if (paused) return;
     roles[ri].classList.remove('on'); ri = (ri + 1) % roles.length; roles[ri].classList.add('on');
   }, 2400);
 
@@ -879,9 +908,12 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
   var elapsed = document.getElementById('elapsed');
   var fill = document.getElementById('rateFill');
   var t0 = performance.now();
+  var frozenAt = 0, wasPaused = false;
   var fmt = new Intl.NumberFormat('en-US');
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
   function tick(now) {
+    if (paused) { if (!wasPaused) { frozenAt = now; wasPaused = true; } return; }
+    if (wasPaused) { t0 += now - frozenAt; wasPaused = false; }
     var s = (now - t0) / 1000;
     counter.textContent = fmt.format(Math.floor(s * PER_SEC));
     var m = Math.floor(s / 60);
@@ -926,6 +958,7 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
     b.addEventListener('click', function () {
       copyText(b.getAttribute('data-copy'), function () {
         b.textContent = 'Copied'; b.classList.add('done');
+        document.getElementById('liveMsg').textContent = 'Link copied to clipboard';
         setTimeout(function () { b.textContent = 'Copy'; b.classList.remove('done'); }, 1600);
       }, function () { b.textContent = 'Select to copy'; });
     });
