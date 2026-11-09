@@ -114,7 +114,22 @@ button { font: inherit; color: inherit; }
 .origin a { color: var(--paper); text-underline-offset: 3px; }
 .origin a:hover { color: var(--accent); }
 .origin b { font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--paper); letter-spacing: .04em; text-transform: uppercase; }
-@media (max-width: 860px) { .explain { grid-template-columns: 1fr; } .origin { grid-template-columns: 1fr; gap: 6px; } }
+/* Under the hood: deeper technical notes */
+.deep-head { margin-top: 48px; display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; }
+.deep-head h2 { font-size: clamp(1.7rem, 3.4vw, 2.4rem); font-variation-settings: "wdth" 85; }
+.deep-head p { max-width: 52ch; font-size: 14.5px; color: var(--muted); }
+.explain.deep { grid-template-columns: repeat(2, 1fr); }
+.explain .wide { grid-column: 1 / -1; }
+.explain p + p { margin-top: 10px; }
+.steps { margin: 14px 0 0; padding: 0; list-style: none; counter-reset: step; display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+.steps li { counter-increment: step; border-top: 2px solid var(--line); padding-top: 10px; font-size: 13.5px; color: var(--muted); line-height: 1.5; }
+.steps li::before { content: counter(step, decimal-leading-zero); display: block; font-family: var(--mono); font-size: 11.5px; color: var(--accent-deep); }
+.steps li b { display: block; margin: 2px 0; color: var(--ink); font-weight: 600; }
+@media (max-width: 860px) {
+  .explain, .explain.deep { grid-template-columns: 1fr; } .origin { grid-template-columns: 1fr; gap: 6px; }
+  .deep-head { display: block; } .deep-head p { margin-top: 8px; }
+  .steps { grid-template-columns: 1fr 1fr; }
+}
 
 main { padding-bottom: clamp(56px, 8vw, 96px); }
 footer { border-top: 1px solid var(--line); padding: 28px 0 40px; color: var(--muted); font-size: 13px; }
@@ -194,12 +209,81 @@ footer a:hover { color: var(--ink); }
       <article>
         <span class="n">02 · Constrain</span>
         <h2>Three kinds of spring</h2>
-        <p><b>Structural</b> springs join neighbours and stop stretching. <b>Shear</b> springs cross each cell diagonally so squares can't skew into diamonds. <b>Bend</b> springs skip a point, resisting sharp folds; they're what makes the cloth feel sturdy. Turn on <i>Shear &amp; bend</i> to see them. For self-collision, a spatial hash finds points that are close in space but far apart on the cloth and pushes them apart, and no point may move more than a set distance per step, so fast motion can't tunnel through.</p>
+        <p><b>Structural</b> springs join neighbours and stop stretching. <b>Shear</b> springs cross each cell diagonally so squares can't skew into diamonds. <b>Bend</b> springs skip a point, resisting sharp folds; they're what makes the cloth feel sturdy. Turn on <i>Shear &amp; bend</i> to see them. How they're solved, and how the cloth avoids passing through itself, is covered below.</p>
       </article>
       <article>
         <span class="n">03 · Shade</span>
         <h2>Lighting the surface</h2>
         <p>Every frame, each point's normal is the cross product of the vectors to its neighbours. A WebGL shader lights the fabric from that normal, with a soft wrap-around key light, a fill light and a sheen at grazing angles. The front is white and the back slate so you can see it turn over, and both blend toward orange wherever the springs are stretched, on the same scale as the lines.</p>
+      </article>
+    </section>
+
+    <div class="deep-head">
+      <h2>Under the hood</h2>
+      <p>The algorithms that keep the cloth stable, stop it passing through itself, and keep a frame cheap enough for high-refresh screens.</p>
+    </div>
+
+    <section class="explain deep" aria-label="Technical details">
+      <article class="wide">
+        <span class="n">04 · Pipeline</span>
+        <h2>One physics step, in order</h2>
+        <p>The simulation advances in fixed steps of <code>1/120 s</code>. Each step runs these stages:</p>
+        <ol class="steps">
+          <li><b>Integrate</b>Verlet moves every free point, adds gravity and wind, and caps how far it can travel.</li>
+          <li><b>Grab</b>The held point chases the cursor at a capped speed and pulls a soft patch around it.</li>
+          <li><b>Find pairs</b>The spatial hash collects the points that are close in space but far apart on the cloth.</li>
+          <li><b>Solve</b>Repeated spring passes, with tearing checked on the first pass and collisions pushed apart between passes.</li>
+          <li><b>Bound</b>The floor (with friction) and soft walls clamp positions, and the step reports its largest motion for sleeping.</li>
+        </ol>
+      </article>
+
+      <article>
+        <span class="n">05 · Solve</span>
+        <h2>Square-root-free springs</h2>
+        <p>A spring's rest length is fixed, so its correction should be <code>(d − L) / d</code>, which needs a square root per spring per pass. Instead it uses Jakobsen's approximation <code>(d² − L²) / (d² + L²)</code>, which needs only squared lengths and is accurate close to rest length, where springs spend nearly all their time. The correction moves both ends, split by inverse mass, so a pinned or held point (inverse mass 0) doesn't move and its partner takes the whole correction.</p>
+        <p>Structural and shear springs only pull: they stop stretching but let the cloth fold and bunch. Bend springs push and pull at a fraction of full strength, which gives drape without stiffness. The passes alternate direction, forward then backward (symmetric Gauss-Seidel). One-directional sweeps let error pile up at the far end of the cloth, and alternating spreads it evenly and converges faster.</p>
+      </article>
+
+      <article>
+        <span class="n">06 · Hash</span>
+        <h2>A two-level spatial hash</h2>
+        <p>Checking every pair of points would be O(N²), so space is divided into cubic cells, and each cell is hashed into one of 4096 buckets: <code>(ix·92837111 ⊕ iy·689287499 ⊕ iz·283923481) &amp; 4095</code>. The large odd multipliers scatter neighbouring cells across buckets, and masking with a power of two replaces a slower modulo. The buckets are rebuilt every step with a counting sort and no per-bucket lists: count per bucket, take a running sum to get each bucket's start, then drop each item into its slot. That is three linear passes over flat integer arrays, with no allocation.</p>
+        <p>Hashing single points stops scaling as density rises. The cells are a fixed size in space, so doubling the density puts four times as many points in each cell, and with four times as many points the work grows sixteenfold. So the grid is grouped into patches of 3 × 3 points, and each patch gets a bounding sphere every step. Only the patches go into the hash, with cells twice as wide as the reach between two patches, so another patch can only lie in this cell or the neighbour on the nearer side of each axis: 8 cells instead of 27. Individual points are compared only between patches whose spheres come within reach. It finds exactly the same pairs as comparing every point, two to three times faster at high density. A patch stretched by a tear would inflate the cells for everyone, so the few oversized ones skip the hash and are checked directly against every patch.</p>
+      </article>
+
+      <article>
+        <span class="n">07 · Collide</span>
+        <h2>Self-collision without tunnelling</h2>
+        <p>Each point is treated as a small sphere, as thick as the cloth. Points within 38 units of each other along the cloth are skipped: springs already hold them apart, and colliding them too would fight the bend springs and make the cloth buzz. The remaining pairs closer than the search radius are gathered once per step. They are then pushed apart to the cloth's thickness three times: after the first spring pass, halfway through, and at the end. That way neither the springs nor the collisions get the last word.</p>
+        <p>The search radius is larger than the thickness, with enough margin for one step of motion. The integrator also caps any point's movement at 12 units per step, less than the 15-unit thickness, so a fast-moving point can't jump straight through another layer between two checks. There is deliberately no friction term: it kept resting layers creeping against each other, so the cloth never fell asleep.</p>
+      </article>
+
+      <article>
+        <span class="n">08 · Tear</span>
+        <h2>Tearing and cutting</h2>
+        <p>With <i>Tearing</i> on, a structural spring snaps once it stretches past three times its rest length. The test compares squared lengths (<code>d² &gt; 9·L²</code>), so no square root here either. Breaking an edge also removes the shear springs of the two cells beside it and the bend springs that span it, otherwise the fabric would stay connected by springs you can't see.</p>
+        <p>Breaks are batched. During a pass an edge is only marked broken, and afterwards a single backward sweep removes every affected spring, filling each gap with the last spring in the list so the list stays packed. Tearing or slicing many edges at once therefore costs one pass over the springs instead of one per edge. A cut projects every spring to the screen and tests it against the mouse stroke with a segment-intersection check.</p>
+      </article>
+
+      <article>
+        <span class="n">09 · Time</span>
+        <h2>Fixed steps, interpolation and sleep</h2>
+        <p>Physics runs on a fixed clock, separate from the display. Each frame adds its elapsed time to an accumulator and runs whole steps, at most four steps or 8 ms per frame. Any time still left over is dropped, so a slow device sees brief slow motion rather than a spiral where each heavy frame demands even more steps. Drawing blends between the last two steps by the leftover fraction, so a 144 Hz screen gets smooth motion from a 120 Hz simulation.</p>
+        <p>Once no point has moved more than 0.05 units in a step for 60 frames in a row, and nothing is held or blowing, the solver goes to sleep. While it sleeps, orbiting the camera reuses the last geometry, and hovering only redraws the 2D ring, so an idle page does essentially no work.</p>
+      </article>
+
+      <article>
+        <span class="n">10 · Grab</span>
+        <h2>A hand-sized grip you can throw</h2>
+        <p>Pulling a single point would just stretch one spring, so a grab pulls a whole patch. Every point within 48 units of the held one keeps its offset from the moment it was grabbed. After every spring pass it is pulled back toward that offset, at 25% strength in the centre fading to nothing at the edge. Dragging works in the plane facing the camera through the held point, so it feels the same from any angle.</p>
+        <p>Throwing comes almost free with Verlet integration. On release, the point's previous position is set one step behind along the pointer's smoothed velocity. Since velocity is just the difference between current and previous position, the point carries that speed straight into the cloth.</p>
+      </article>
+
+      <article class="wide">
+        <span class="n">11 · Memory</span>
+        <h2>Nothing allocated per frame</h2>
+        <p>The cloth lives in flat typed arrays (positions, previous positions, inverse masses, spring endpoints and squared rest lengths), sized once for the chosen density. The spring list stays packed, so every solver loop is a straight walk through memory. Rendering follows the same rule: GPU buffers are sized once and refilled in place each frame, pins are drawn straight from the position buffer by index, and the geometry is rebuilt only when something actually moved.</p>
+        <p>No garbage is created per frame, so the garbage collector has nothing to pause for mid-animation.</p>
       </article>
     </section>
 

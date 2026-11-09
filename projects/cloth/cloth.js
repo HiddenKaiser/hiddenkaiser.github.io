@@ -7,20 +7,21 @@
   /* PHYSICS-START ======================================================================
      Pure simulation: flat typed arrays, no DOM. World units; y points down, the viewer is at -z. */
   var COLS = 33, ROWS = 21, SPACING = 19;
-  var DENSITY_MULT = 1.25
+  var DENSITY_MULT = 1
 
   var DENSITY_MIN = 0.5; // minimum density for slider
-  var DENSITY_MAX = 2.25; // maximum density for slider
+  var DENSITY_MAX = 2.0; // maximum density for slider
 
   var GRAVITY = 1500;            // world units / s^2
   var DAMPING = 0.985;           // fraction of velocity kept per step
-  var ITERATIONS = 10;            // constraint passes per step (more passes = less stretch)
+  var ITERATIONS = 8;            // constraint passes per step (more passes = less stretch)
   var STEP = 1 / 120;            // fixed physics timestep
   var TEAR_RATIO = 3;            // a structural spring snaps beyond this multiple of its rest length
   var BEND_STIFFNESS = 0.2;      // fraction of the bend correction applied per pass
   var SELF_DIST = 15;            // self-collision: closest two non-neighbouring points may get (cloth thickness)
   var SELF_REACH = 22;           // radius candidate pairs are gathered within (thickness + margin for one step of motion)
-  var SELF_CELL = 2 * SELF_REACH; // hash cells twice the reach: each point then only checks 8 cells, not 27
+  var SELF_SKIP = 38;            // points closer than this along the cloth (world units) never collide: springs keep them apart
+  var PATCH = 3;                 // self-collision groups the grid into patches of up to PATCH x PATCH points (see gatherPairs)
   var HASH_SIZE = 4096;          // spatial hash buckets (power of two)
   var MAX_STEP = 12;             // no point moves further than this in one step, so nothing tunnels through
   var MAX_GRAB_SPEED = 1440;     // world units / s a held point can travel (= MAX_STEP per 1/120 s step)
@@ -42,13 +43,21 @@
   var EDGE;                                      // 1 while a structural edge is intact
   var M = 0;                                     // live springs, dense in [0, M)
   var topology = 0;                              // bumps whenever the mesh changes
+  var CELLDEAD;                                  // 1 once any of a grid cell's four structural edges has broken
+  var needSweep = false;                         // edges were broken; their springs still need removing (sweepSprings)
+  var geomVersion = 0;                           // bumps whenever point positions may have changed (renderer caches on it)
+  var pinsVersion = 0;                           // bumps whenever the set of pinned points changes
   var wind = false, tearing = false, grabbed = -1, simTime = 0;
   var target = { x: 0, y: 0, z: 0 };             // where the held point is being pulled
   // the soft patch around the held point: which points, how strongly, and their offsets at grab time
   var GI, GW, GOX, GOY, GOZ, grabCount = 0;
   // self-collision scratch space, reallocated only when the density changes
   var ROWI, COLI, cellStart = new Int32Array(HASH_SIZE + 1), cellItems, pointCell;
+  var SEEN = new Int32Array(HASH_SIZE), seenStamp = 0;   // buckets already scanned for the current patch
   var MAX_PAIRS, PAIR_A, PAIR_B, pairCount = 0;
+  // self-collision patches: topology window in grid steps, patch size, members (PMEM, from PSTART[p]),
+  // grid extents (rows PR0..PR1, cols PC0..PC1), and per step a bounding sphere (centre PCX/PCY/PCZ, radius PRAD)
+  var SKIP, PK, NPATCH, PSTART, PMEM, PR0, PR1, PC0, PC1, PCX, PCY, PCZ, PRAD, BIG, PATCH_RCAP;
 
   const originalCols = COLS;
   const originalRows = ROWS;
@@ -75,6 +84,7 @@
     KIND = new Uint8Array(MAX_SPRINGS);
     REF1 = new Int32Array(MAX_SPRINGS); REF2 = new Int32Array(MAX_SPRINGS);
     EDGE = new Uint8Array(NE);
+    CELLDEAD = new Uint8Array(NC);
     M = 0;
     GI = new Int32Array(N); GW = new Float64Array(N); GOX = new Float64Array(N); GOY = new Float64Array(N); GOZ = new Float64Array(N);
     grabbed = -1; grabCount = 0;
@@ -83,6 +93,27 @@
     for (var gi = 0; gi < N; gi++) { ROWI[gi] = (gi / COLS) | 0; COLI[gi] = gi % COLS; }
     cellItems = new Int32Array(N); pointCell = new Int32Array(N);
     MAX_PAIRS = N * 16; PAIR_A = new Int32Array(MAX_PAIRS); PAIR_B = new Int32Array(MAX_PAIRS); pairCount = 0;
+
+    // The topology window is a fixed distance along the cloth, so collisions behave the same at any density.
+    // Patches are no wider than that window, so two points in the same patch never need testing.
+    SKIP = Math.max(1, Math.round(SELF_SKIP / SPACING));
+    PK = Math.min(PATCH, SKIP + 1);
+    var npr = Math.ceil(ROWS / PK), npc = Math.ceil(COLS / PK), pn = 0, p, r, c;
+    NPATCH = npr * npc;
+    PSTART = new Int32Array(NPATCH + 1); PMEM = new Int32Array(N);
+    PR0 = new Int32Array(NPATCH); PR1 = new Int32Array(NPATCH); PC0 = new Int32Array(NPATCH); PC1 = new Int32Array(NPATCH);
+    PCX = new Float64Array(NPATCH); PCY = new Float64Array(NPATCH); PCZ = new Float64Array(NPATCH); PRAD = new Float64Array(NPATCH);
+    BIG = new Int32Array(NPATCH);
+    for (var pa = 0; pa < npr; pa++) for (var pb = 0; pb < npc; pb++) {
+      p = pa * npc + pb; PSTART[p] = pn;
+      PR0[p] = pa * PK; PR1[p] = Math.min(ROWS, pa * PK + PK) - 1;
+      PC0[p] = pb * PK; PC1[p] = Math.min(COLS, pb * PK + PK) - 1;
+      for (r = PR0[p]; r <= PR1[p]; r++) for (c = PC0[p]; c <= PC1[p]; c++) PMEM[pn++] = r * COLS + c;
+    }
+    PSTART[NPATCH] = pn;
+    // a flat patch fits in a sphere of its half-diagonal; past 1.5x that (stretched hard, or split by a tear)
+    // it is handled separately so one huge patch can't inflate the hash cells for everyone
+    PATCH_RCAP = 1.5 * (PK - 1) * SPACING * Math.SQRT1_2 + 1;
     topology++;
   }
 
@@ -110,7 +141,6 @@
       GI[grabCount] = j; GW[grabCount] = GRAB_PULL * f; GOX[grabCount] = ox; GOY[grabCount] = oy; GOZ[grabCount] = oz; grabCount++;
     }
   }
-  var tears = [];
   var selfCollide = true;
 
   function hEdge(r, c) { return r * (COLS - 1) + c; }
@@ -156,7 +186,8 @@
       if (c < COLS - 2) addSpring(i, i + 2, KIND_BEND, hEdge(r, c), hEdge(r, c + 1));
       if (r < ROWS - 2) addSpring(i, i + 2 * COLS, KIND_BEND, vEdge(r, c), vEdge(r + 1, c));
     }
-    grabbed = -1; grabCount = 0; tears.length = 0; topology++;
+    CELLDEAD.fill(0); needSweep = false;
+    grabbed = -1; grabCount = 0; topology++; geomVersion++; pinsVersion++;
   }
 
   function removeSpring(s) {   // swap-remove keeps [0, M) dense
@@ -166,18 +197,21 @@
 
   // Breaking a structural edge also drops the shear springs of the cells beside it and the
   // bend springs spanning it, so the fabric really separates instead of hanging on hidden springs.
+  // breakEdge only marks the edge and its cells; sweepSprings then removes every affected spring in one
+  // pass, so tearing or cutting k edges at once costs one O(M) sweep instead of k of them.
   function breakEdge(e) {
     if (!EDGE[e]) return;
-    EDGE[e] = 0; topology++;
-    var c1 = -1, c2 = -1, r, c, k;
-    if (e < HE) { r = (e / (COLS - 1)) | 0; c = e % (COLS - 1); if (r > 0) c1 = cellId(r - 1, c); if (r < ROWS - 1) c2 = cellId(r, c); }
-    else { k = e - HE; r = (k / COLS) | 0; c = k % COLS; if (c > 0) c1 = cellId(r, c - 1); if (c < COLS - 1) c2 = cellId(r, c); }
-    for (var s = M - 1; s >= 0; s--) {
+    EDGE[e] = 0; needSweep = true; topology++;
+    var r, c, k;
+    if (e < HE) { r = (e / (COLS - 1)) | 0; c = e % (COLS - 1); if (r > 0) CELLDEAD[cellId(r - 1, c)] = 1; if (r < ROWS - 1) CELLDEAD[cellId(r, c)] = 1; }
+    else { k = e - HE; r = (k / COLS) | 0; c = k % COLS; if (c > 0) CELLDEAD[cellId(r, c - 1)] = 1; if (c < COLS - 1) CELLDEAD[cellId(r, c)] = 1; }
+  }
+  function sweepSprings() {
+    for (var s = M - 1; s >= 0; s--) {   // backwards, so the spring swapped into s has already been checked
       var kd = KIND[s];
-      if ((kd === KIND_STRUCT && REF1[s] === e) ||
-          (kd === KIND_SHEAR && (REF1[s] === c1 || REF1[s] === c2)) ||
-          (kd === KIND_BEND && (REF1[s] === e || REF2[s] === e))) removeSpring(s);
+      if (kd === KIND_STRUCT ? !EDGE[REF1[s]] : kd === KIND_SHEAR ? CELLDEAD[REF1[s]] : (!EDGE[REF1[s]] || !EDGE[REF2[s]])) removeSpring(s);
     }
+    needSweep = false; topology++;
   }
 
   // Move both ends of a spring toward its rest length, split by inverse mass.
@@ -201,33 +235,81 @@
   function hashCell(ix, iy, iz) {
     return (Math.imul(ix, 92837111) ^ Math.imul(iy, 689287499) ^ Math.imul(iz, 283923481)) & (HASH_SIZE - 1);
   }
-  // Bin every point into a hash grid (counting sort, no allocation), then collect the pairs that are
-  // close in space but not close on the cloth. Neighbours within two grid steps are skipped: they are
-  // already held apart by the springs, and colliding them would fight the bend springs.
+  // Collect the pairs of points that are close in space but not close on the cloth (two-level broad phase).
+  // Points within SKIP grid steps of each other are skipped: springs already hold them apart, and colliding
+  // them would fight the bend springs.
+  //
+  // Hashing single points stops scaling at high density: the hash cells are a fixed size in world units, so
+  // points per cell grow with density squared and the scan with density to the fourth. Instead the grid is
+  // grouped into small patches. Each step every patch gets a bounding sphere, the spheres go into the hash,
+  // and individual points are compared only between patches whose spheres come within reach. This finds
+  // exactly the same pairs as comparing every point, with far fewer comparisons.
   function gatherPairs() {
-    var inv = 1 / SELF_CELL, i, k, hh, q2 = SELF_REACH * SELF_REACH;
+    var p, k, i, hh, nbig = 0, rmax = 0;
+    // 1. bounding sphere of every patch: centre = mean of its points, radius = farthest point
+    for (p = 0; p < NPATCH; p++) {
+      var s0 = PSTART[p], s1 = PSTART[p + 1], cx = 0, cy = 0, cz = 0, r2 = 0;
+      for (k = s0; k < s1; k++) { i = PMEM[k]; cx += X[i]; cy += Y[i]; cz += Z[i]; }
+      var invn = 1 / (s1 - s0); cx *= invn; cy *= invn; cz *= invn;
+      for (k = s0; k < s1; k++) { i = PMEM[k]; var ex = X[i] - cx, ey = Y[i] - cy, ez = Z[i] - cz, e2 = ex * ex + ey * ey + ez * ez; if (e2 > r2) r2 = e2; }
+      var rad = Math.sqrt(r2);
+      PCX[p] = cx; PCY[p] = cy; PCZ[p] = cz; PRAD[p] = rad;
+      if (rad > PATCH_RCAP) BIG[nbig++] = p;            // oversized: tested against every patch in step 4
+      else if (rad > rmax) rmax = rad;
+    }
+    // 2. counting sort of the normal patches into hash buckets (no per-bucket lists, no allocation). Two patches
+    //    can only have points within reach if their centres are within SELF_REACH + 2 * rmax; cells twice that
+    //    wide mean the other centre lies in this cell or the neighbour on the nearer side of each axis: 8 cells.
+    var cell = 2 * (SELF_REACH + 2 * rmax), inv = 1 / cell;
     cellStart.fill(0);
-    for (i = 0; i < N; i++) {
-      hh = hashCell(Math.floor(X[i] * inv), Math.floor(Y[i] * inv), Math.floor(Z[i] * inv));
-      pointCell[i] = hh; cellStart[hh]++;
+    for (p = 0; p < NPATCH; p++) {
+      if (PRAD[p] > PATCH_RCAP) { pointCell[p] = -1; continue; }
+      hh = hashCell(Math.floor(PCX[p] * inv), Math.floor(PCY[p] * inv), Math.floor(PCZ[p] * inv));
+      pointCell[p] = hh; cellStart[hh]++;
     }
     for (hh = 1; hh <= HASH_SIZE; hh++) cellStart[hh] += cellStart[hh - 1];
-    for (i = 0; i < N; i++) cellItems[--cellStart[pointCell[i]]] = i;
+    for (p = 0; p < NPATCH; p++) if (pointCell[p] >= 0) cellItems[--cellStart[pointCell[p]]] = p;
+    var hashed = cellStart[HASH_SIZE];
     pairCount = 0;
-    for (i = 0; i < N; i++) {
-      var fx = X[i] * inv, fy = Y[i] * inv, fz = Z[i] * inv, ix = Math.floor(fx), iy = Math.floor(fy), iz = Math.floor(fz);
-      // anything within SELF_REACH lies in this cell or the neighbour on the nearer side, per axis
-      var sx = fx - ix < 0.5 ? -1 : 1, sy = fy - iy < 0.5 ? -1 : 1, sz = fz - iz < 0.5 ? -1 : 1, ri = ROWI[i], ci = COLI[i];
+    // 3. normal patches: each pair once (b > a in bucket order), each bucket once even if two cells share it
+    for (var a = 0; a < hashed; a++) {
+      var pa = cellItems[a];
+      var fx = PCX[pa] * inv, fy = PCY[pa] * inv, fz = PCZ[pa] * inv, ix = Math.floor(fx), iy = Math.floor(fy), iz = Math.floor(fz);
+      var sx = fx - ix < 0.5 ? -1 : 1, sy = fy - iy < 0.5 ? -1 : 1, sz = fz - iz < 0.5 ? -1 : 1;
+      seenStamp++;
       for (var ox = 0; ox < 2; ox++) for (var oy = 0; oy < 2; oy++) for (var oz = 0; oz < 2; oz++) {
         hh = hashCell(ix + ox * sx, iy + oy * sy, iz + oz * sz);
-        for (k = cellStart[hh]; k < cellStart[hh + 1]; k++) {
-          var j = cellItems[k];
-          if (j <= i) continue;
-          var dr = ROWI[j] - ri, dc = COLI[j] - ci;
-          if (dr <= 2 && dr >= -2 && dc <= 2 && dc >= -2) continue;
-          var ex = X[j] - X[i], ey = Y[j] - Y[i], ez = Z[j] - Z[i];
-          if (ex * ex + ey * ey + ez * ez < q2 && pairCount < MAX_PAIRS) { PAIR_A[pairCount] = i; PAIR_B[pairCount] = j; pairCount++; }
-        }
+        if (SEEN[hh] === seenStamp) continue;
+        SEEN[hh] = seenStamp;
+        for (var b = cellStart[hh] > a ? cellStart[hh] : a + 1, end = cellStart[hh + 1]; b < end; b++) collidePatches(pa, cellItems[b]);
+      }
+    }
+    // 4. oversized patches against every other patch (rare, and there are few patches, so brute force is cheap)
+    for (var q = 0; q < nbig; q++) {
+      var g = BIG[q];
+      for (p = 0; p < NPATCH; p++) if (p !== g && !(p < g && PRAD[p] > PATCH_RCAP)) collidePatches(g, p);
+    }
+  }
+  // Narrow phase between two patches: every point of one against every point of the other.
+  function collidePatches(pa, pb) {
+    // all their point pairs lie within the topology window: nothing to test
+    var mr = PR1[pa] - PR0[pb], mr2 = PR1[pb] - PR0[pa], mc = PC1[pa] - PC0[pb], mc2 = PC1[pb] - PC0[pa];
+    if ((mr > mr2 ? mr : mr2) <= SKIP && (mc > mc2 ? mc : mc2) <= SKIP) return;
+    // bounding spheres too far apart
+    var bx = PCX[pb], by = PCY[pb], bz = PCZ[pb], rb = PRAD[pb];
+    var dx = bx - PCX[pa], dy = by - PCY[pa], dz = bz - PCZ[pa], lim = SELF_REACH + PRAD[pa] + rb;
+    if (dx * dx + dy * dy + dz * dz >= lim * lim) return;
+    var q2 = SELF_REACH * SELF_REACH, qb = SELF_REACH + rb, qb2 = qb * qb, b0 = PSTART[pb], b1 = PSTART[pb + 1];
+    for (var u = PSTART[pa], u1 = PSTART[pa + 1]; u < u1; u++) {
+      var i = PMEM[u], xi = X[i], yi = Y[i], zi = Z[i];
+      var hx = xi - bx, hy = yi - by, hz = zi - bz;
+      if (hx * hx + hy * hy + hz * hz >= qb2) continue;     // this point can't reach any point of patch b
+      var ri = ROWI[i], ci = COLI[i];
+      for (var v = b0; v < b1; v++) {
+        var j = PMEM[v], dr = ROWI[j] - ri, dc = COLI[j] - ci;
+        if (dr <= SKIP && dr >= -SKIP && dc <= SKIP && dc >= -SKIP) continue;
+        var gx = X[j] - xi, gy = Y[j] - yi, gz = Z[j] - zi;
+        if (gx * gx + gy * gy + gz * gz < q2 && pairCount < MAX_PAIRS) { PAIR_A[pairCount] = i; PAIR_B[pairCount] = j; pairCount++; }
       }
     }
   }
@@ -249,7 +331,7 @@
 
   // One fixed physics step. Returns the largest distance any point moved (for sleeping).
   function step(dt) {
-    simTime += dt;
+    simTime += dt; geomVersion++;
     var dt2 = dt * dt, gy = GRAVITY * dt2, i, s, x, y, z, it;
 
     // 1. Verlet integration
@@ -287,11 +369,11 @@
     for (s = 0; s < M; s++) {
       if (tearing && KIND[s] === KIND_STRUCT) {
         var a = SA[s], b = SB[s], dx = X[b] - X[a], dy = Y[b] - Y[a], dz = Z[b] - Z[a];
-        if (dx * dx + dy * dy + dz * dz > RR[s] * tearLimit) { tears.push(REF1[s]); continue; }
+        if (dx * dx + dy * dy + dz * dz > RR[s] * tearLimit) { breakEdge(REF1[s]); continue; }   // removed by the sweep below
       }
       relax(s);
     }
-    if (tears.length) { for (i = 0; i < tears.length; i++) breakEdge(tears[i]); tears.length = 0; }
+    if (needSweep) sweepSprings();
     if (selfCollide) resolvePairs();
     for (it = 1; it < ITERATIONS; it++) {
       if (it & 1) { for (s = M - 1; s >= 0; s--) relax(s); }
@@ -324,21 +406,30 @@
   var canvas = document.getElementById('cloth');
   var overlay = document.getElementById('overlay');
   var octx = overlay.getContext('2d');
-  var gl = canvas.getContext('webgl', { antialias: true, alpha: true, premultipliedAlpha: false, stencil: true });
+  // WebGL 2 where available: its bufferSubData can upload part of a typed array without making a view object.
+  // The shaders are GLSL ES 1.00, which both versions accept.
+  var GL_OPTS = { antialias: true, alpha: true, premultipliedAlpha: false, stencil: true };
+  var gl = canvas.getContext('webgl2', GL_OPTS) || canvas.getContext('webgl', GL_OPTS);
+  var gl2 = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext;
   if (!gl) { document.getElementById('nogl').hidden = false; return; }
 
   var mode = 'grab', showSurface = true, showSprings = true, showHidden = false;
   var hover = -1, cssW = 1, cssH = 1, dpr = 1;
   var pointer = { x: 0, y: 0, vx: 0, vy: 0, vz: 0, t: 0, down: false, cutting: false, orbiting: false, inside: false, wx: 0, wy: 0, wz: 0 };
-  var still = 0, asleep = false, dirty = true;
-  function wake() { asleep = false; still = 0; dirty = true; }
+  var still = 0, asleep = false, dirty = true;   // dirty: redraw everything this frame
+  var overlayDirty = false;                       // redraw only the 2D overlay (hover ring) this frame
+  // anything that wakes the solver may also have moved points, so the renderer's cached geometry is stale
+  function wake() { asleep = false; still = 0; dirty = true; geomVersion++; }
 
   /* ---------- Camera: small matrix helpers (column-major, like WebGL) ---------- */
   // head-on, slightly raised, with a long lens: reads as 2.5D, and you can still orbit
   var CAM_HOME = { yaw: 0, pitch: 0.07 };
   var cam = { yaw: CAM_HOME.yaw, pitch: CAM_HOME.pitch, dist: 1750, fov: 19 * Math.PI / 180, tx: 500, ty: 280, tz: 40 };
   function homeCamera() { cam.yaw = CAM_HOME.yaw; cam.pitch = CAM_HOME.pitch; updateCamera(); dirty = true; }
-  var VP = new Float32Array(16), IVP = new Float32Array(16), EYE = [0, 0, 0], FWD = [0, 0, 1];
+  var VP = new Float32Array(16), IVP = new Float32Array(16), EYE = new Float64Array(3), FWD = new Float64Array([0, 0, 1]);
+  var VIEW = new Float32Array(16), PROJ = new Float32Array(16);   // scratch for updateCamera
+  var PP = new Float64Array(2);                                    // projectPoint's result
+  var UA = new Float64Array(3), UB = new Float64Array(3), UW = new Float64Array(3);   // unprojectToPlane scratch / result
 
   function mul(a, b, out) {
     for (var c = 0; c < 4; c++) for (var r = 0; r < 4; r++)
@@ -370,18 +461,20 @@
     EYE[1] = cam.ty - cam.dist * Math.sin(cam.pitch);          // y is down, so "above" is negative y
     EYE[2] = cam.tz - cam.dist * Math.cos(cam.yaw) * cp;       // the viewer sits on the -z side
     // look-at basis with "up" = -y
-    var zx = EYE[0] - cam.tx, zy = EYE[1] - cam.ty, zz = EYE[2] - cam.tz, zl = Math.hypot(zx, zy, zz);
+    var zx = EYE[0] - cam.tx, zy = EYE[1] - cam.ty, zz = EYE[2] - cam.tz, zl = Math.sqrt(zx * zx + zy * zy + zz * zz);
     zx /= zl; zy /= zl; zz /= zl;
     FWD[0] = -zx; FWD[1] = -zy; FWD[2] = -zz;
     var ux = 0, uy = -1, uz = 0;
-    var xx = uy * zz - uz * zy, xy = uz * zx - ux * zz, xz = ux * zy - uy * zx, xl = Math.hypot(xx, xy, xz);
+    var xx = uy * zz - uz * zy, xy = uz * zx - ux * zz, xz = ux * zy - uy * zx, xl = Math.sqrt(xx * xx + xy * xy + xz * xz);
     xx /= xl; xy /= xl; xz /= xl;
     var yx = zy * xz - zz * xy, yy = zz * xx - zx * xz, yz = zx * xy - zy * xx;
-    var view = [xx, yx, zx, 0, xy, yy, zy, 0, xz, yz, zz, 0,
-      -(xx * EYE[0] + xy * EYE[1] + xz * EYE[2]), -(yx * EYE[0] + yy * EYE[1] + yz * EYE[2]), -(zx * EYE[0] + zy * EYE[1] + zz * EYE[2]), 1];
-    var f = 1 / Math.tan(cam.fov / 2), near = 50, far = 5000, nf = 1 / (near - far), aspect = cssW / cssH;
-    var proj = [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) * nf, -1, 0, 0, 2 * far * near * nf, 0];
-    mul(proj, view, VP);
+    var v = VIEW;
+    v[0] = xx; v[1] = yx; v[2] = zx; v[3] = 0; v[4] = xy; v[5] = yy; v[6] = zy; v[7] = 0; v[8] = xz; v[9] = yz; v[10] = zz; v[11] = 0;
+    v[12] = -(xx * EYE[0] + xy * EYE[1] + xz * EYE[2]); v[13] = -(yx * EYE[0] + yy * EYE[1] + yz * EYE[2]); v[14] = -(zx * EYE[0] + zy * EYE[1] + zz * EYE[2]); v[15] = 1;
+    var f = 1 / Math.tan(cam.fov / 2), near = 50, far = 5000, nf = 1 / (near - far), aspect = cssW / cssH, pr = PROJ;
+    pr.fill(0);
+    pr[0] = f / aspect; pr[5] = f; pr[10] = (far + near) * nf; pr[11] = -1; pr[14] = 2 * far * near * nf;
+    mul(PROJ, VIEW, VP);
     invert(VP, IVP);
   }
 
@@ -396,22 +489,28 @@
       SYp[i] = (1 - (m[1] * x + m[5] * y + m[9] * z + m[13]) / w) * 0.5 * cssH;
     }
   }
+  // writes the CSS-pixel position into PP (no allocation)
   function projectPoint(x, y, z) {
     var m = VP, w = m[3] * x + m[7] * y + m[11] * z + m[15];
-    return [((m[0] * x + m[4] * y + m[8] * z + m[12]) / w + 1) * 0.5 * cssW, (1 - (m[1] * x + m[5] * y + m[9] * z + m[13]) / w) * 0.5 * cssH];
+    PP[0] = ((m[0] * x + m[4] * y + m[8] * z + m[12]) / w + 1) * 0.5 * cssW;
+    PP[1] = (1 - (m[1] * x + m[5] * y + m[9] * z + m[13]) / w) * 0.5 * cssH;
   }
-  // ray through a CSS pixel, intersected with the plane facing the camera through point (px, py, pz)
+  function unproject(nx, ny, z, out) {
+    var m = IVP;
+    var x = m[0] * nx + m[4] * ny + m[8] * z + m[12], y = m[1] * nx + m[5] * ny + m[9] * z + m[13];
+    var zz = m[2] * nx + m[6] * ny + m[10] * z + m[14], w = m[3] * nx + m[7] * ny + m[11] * z + m[15];
+    out[0] = x / w; out[1] = y / w; out[2] = zz / w;
+  }
+  // ray through a CSS pixel, intersected with the plane facing the camera through point (px, py, pz).
+  // Returns the shared UW array: read it before the next call.
   function unprojectToPlane(sx, sy, px, py, pz) {
-    var nx = sx / cssW * 2 - 1, ny = 1 - sy / cssH * 2, m = IVP;
-    function un(z) {
-      var x = m[0] * nx + m[4] * ny + m[8] * z + m[12], y = m[1] * nx + m[5] * ny + m[9] * z + m[13];
-      var zz = m[2] * nx + m[6] * ny + m[10] * z + m[14], w = m[3] * nx + m[7] * ny + m[11] * z + m[15];
-      return [x / w, y / w, zz / w];
-    }
-    var a = un(-1), b = un(1), d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    var den = d[0] * FWD[0] + d[1] * FWD[1] + d[2] * FWD[2];
-    var t = ((px - a[0]) * FWD[0] + (py - a[1]) * FWD[1] + (pz - a[2]) * FWD[2]) / den;
-    return [a[0] + d[0] * t, a[1] + d[1] * t, a[2] + d[2] * t];
+    var nx = sx / cssW * 2 - 1, ny = 1 - sy / cssH * 2;
+    unproject(nx, ny, -1, UA); unproject(nx, ny, 1, UB);
+    var dx = UB[0] - UA[0], dy = UB[1] - UA[1], dz = UB[2] - UA[2];
+    var den = dx * FWD[0] + dy * FWD[1] + dz * FWD[2];
+    var t = ((px - UA[0]) * FWD[0] + (py - UA[1]) * FWD[1] + (pz - UA[2]) * FWD[2]) / den;
+    UW[0] = UA[0] + dx * t; UW[1] = UA[1] + dy * t; UW[2] = UA[2] + dz * t;
+    return UW;
   }
 
   /* ---------- Shaders ---------- */
@@ -423,11 +522,12 @@
   function program(vs, fs) {
     var p = gl.createProgram();
     gl.attachShader(p, compile(gl.VERTEX_SHADER, vs)); gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+    gl.bindAttribLocation(p, 0, 'aPos');   // keep attribute 0 always enabled (the pins draw with aStrain disabled)
     gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
-    var info = { p: p, a: {}, u: {} }, i, n;
+    var info = { p: p, a: {}, u: {}, locs: [] }, i, n;
     n = gl.getProgramParameter(p, gl.ACTIVE_ATTRIBUTES);
-    for (i = 0; i < n; i++) { var at = gl.getActiveAttrib(p, i); info.a[at.name] = gl.getAttribLocation(p, at.name); }
+    for (i = 0; i < n; i++) { var at = gl.getActiveAttrib(p, i); info.a[at.name] = gl.getAttribLocation(p, at.name); info.locs.push(info.a[at.name]); }
     n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
     for (i = 0; i < n; i++) { var un = gl.getActiveUniform(p, i); info.u[un.name] = gl.getUniformLocation(p, un.name); }
     return info;
@@ -486,25 +586,50 @@
     '}'].join('\n'));
 
   /* ---------- Buffers ---------- */
-  var posData, norData, uvData, idxData, lineData, pinData, stressData, RX, RY, RZ;
-  var idxCount = 0, builtTopology = -1, lineCount = [0, 0, 0], pinCount = 0;
+  // Every array draw() touches is allocated in allocRender(), once per density, and the GPU buffers are sized
+  // there too. A frame only fills those arrays and copies them in with bufferSubData, so drawing allocates
+  // nothing in JS and never makes the driver reallocate GPU storage.
+  var posData, norData, uvData, stressData, idxData, pinIdx, lineData;
+  var idxCount = 0, pinCount = 0, lineCount = new Int32Array(3);
+  var builtTopology = -1, builtPins = -1;
+  // what the cached geometry (positions, normals, stress, spring lines) was built from; see draw()
+  var drawnGeom = -1, drawnTopo = -1, drawnAlpha = -1, drawnFlags = -1;
 
-  var bufPos = gl.createBuffer(), bufNor = gl.createBuffer(), bufUv = gl.createBuffer(), bufIdx = gl.createBuffer();
-  var bufLines = [gl.createBuffer(), gl.createBuffer(), gl.createBuffer()], bufPins = gl.createBuffer(), bufFloor = gl.createBuffer(), bufStress = gl.createBuffer();
+  var bufPos = gl.createBuffer(), bufNor = gl.createBuffer(), bufUv = gl.createBuffer(), bufStress = gl.createBuffer();
+  var bufIdx = gl.createBuffer(), bufPinIdx = gl.createBuffer(), bufFloor = gl.createBuffer();
+  var bufLines = [gl.createBuffer(), gl.createBuffer(), gl.createBuffer()];
 
-  // (Re)size the drawing arrays to the current grid and upload its texture coordinates. Call after applyDensity().
+  function reserve(target, buf, bytes) { gl.bindBuffer(target, buf); gl.bufferData(target, bytes, gl.DYNAMIC_DRAW); }
+  // Copy the first `len` elements of `data` into `buf`. WebGL 2 copies exactly that range; WebGL 1 has no
+  // range form, so it copies the whole (preallocated) array rather than allocate a subarray view.
+  function upload(target, buf, data, len) {
+    gl.bindBuffer(target, buf);
+    if (gl2) gl.bufferSubData(target, 0, data, 0, len);
+    else gl.bufferSubData(target, 0, data);
+  }
+
+  // (Re)size the drawing arrays and GPU buffers to the current grid. Call after applyDensity().
   function allocRender() {
     posData = new Float32Array(N * 3); norData = new Float32Array(N * 3); uvData = new Float32Array(N * 2);
+    stressData = new Float32Array(N);
     for (var r0 = 0; r0 < ROWS; r0++) for (var c0 = 0; c0 < COLS; c0++) {
       uvData[(r0 * COLS + c0) * 2] = c0 / (COLS - 1); uvData[(r0 * COLS + c0) * 2 + 1] = r0 / (ROWS - 1);
     }
-    idxData = new Uint16Array(NC * 6); idxCount = 0; builtTopology = -1;
-    lineData = [new Float32Array(MAX_SPRINGS * 8), new Float32Array(MAX_SPRINGS * 8), new Float32Array(MAX_SPRINGS * 8)];
-    pinData = new Float32Array(N * 4);
-    stressData = new Float32Array(N);
-    RX = new Float64Array(N); RY = new Float64Array(N); RZ = new Float64Array(N);
+    idxData = new Uint16Array(NC * 6); pinIdx = new Uint16Array(N);
+    // one line array per spring kind, each sized to how many springs of that kind the grid has
+    var cap = [NE, 2 * NC, MAX_SPRINGS - NE - 2 * NC];
+    lineData = [new Float32Array(cap[0] * 8), new Float32Array(cap[1] * 8), new Float32Array(cap[2] * 8)];
     SXp = new Float32Array(N); SYp = new Float32Array(N);
+    idxCount = pinCount = 0; lineCount.fill(0);
+    builtTopology = builtPins = drawnGeom = drawnTopo = drawnFlags = -1; drawnAlpha = -1;
+
     gl.bindBuffer(gl.ARRAY_BUFFER, bufUv); gl.bufferData(gl.ARRAY_BUFFER, uvData, gl.STATIC_DRAW);
+    reserve(gl.ARRAY_BUFFER, bufPos, posData.byteLength);
+    reserve(gl.ARRAY_BUFFER, bufNor, norData.byteLength);
+    reserve(gl.ARRAY_BUFFER, bufStress, stressData.byteLength);
+    for (var k = 0; k < 3; k++) reserve(gl.ARRAY_BUFFER, bufLines[k], lineData[k].byteLength);
+    reserve(gl.ELEMENT_ARRAY_BUFFER, bufIdx, idxData.byteLength);
+    reserve(gl.ELEMENT_ARRAY_BUFFER, bufPinIdx, pinIdx.byteLength);
   }
   allocRender();
 
@@ -513,19 +638,26 @@
   for (fz = -500; fz <= 900; fz += 50) floorVerts.push(-400, FLOOR, fz, 1, 1400, FLOOR, fz, 1);
   var floorCount = floorVerts.length / 4;
   gl.bindBuffer(gl.ARRAY_BUFFER, bufFloor); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(floorVerts), gl.STATIC_DRAW);
+  floorVerts = null;
 
+  // triangles: a cell is drawn only while all four of its structural edges are intact
   function rebuildIndices() {
-    // a cell is drawn only while all four of its structural edges are intact
     idxCount = 0;
     for (var r = 0; r < ROWS - 1; r++) for (var c = 0; c < COLS - 1; c++) {
-      if (!EDGE[hEdge(r, c)] || !EDGE[hEdge(r + 1, c)] || !EDGE[vEdge(r, c)] || !EDGE[vEdge(r, c + 1)]) continue;
+      if (CELLDEAD[cellId(r, c)]) continue;
       var i = r * COLS + c;
       idxData[idxCount++] = i; idxData[idxCount++] = i + 1; idxData[idxCount++] = i + COLS + 1;
       idxData[idxCount++] = i; idxData[idxCount++] = i + COLS + 1; idxData[idxCount++] = i + COLS;
     }
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufIdx);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idxData.subarray(0, idxCount), gl.DYNAMIC_DRAW);
+    if (idxCount) upload(gl.ELEMENT_ARRAY_BUFFER, bufIdx, idxData, idxCount);
     builtTopology = topology;
+  }
+  // pins are drawn straight from the position buffer through this index list, rebuilt only when pins change
+  function rebuildPins() {
+    pinCount = 0;
+    for (var i = 0; i < N; i++) if (PIN[i]) pinIdx[pinCount++] = i;
+    if (pinCount) upload(gl.ELEMENT_ARRAY_BUFFER, bufPinIdx, pinIdx, pinCount);
+    builtPins = pinsVersion;
   }
 
   /* ---------- Drawing ---------- */
@@ -536,16 +668,76 @@
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, size, gl.FLOAT, false, stride || 0, offset || 0);
   }
-  function disableAttribs(prog) { for (var k in prog.a) gl.disableVertexAttribArray(prog.a[k]); }
+  function disableAttribs(prog) { for (var k = 0; k < prog.locs.length; k++) gl.disableVertexAttribArray(prog.locs[k]); }
+
+  // spring colours per kind: base rgba, then strained rgba (structural alpha depends on showSurface, set in draw)
+  var LINE_COLORS = [
+    new Float32Array([0.05, 0.06, 0.08, 0.55, 1.0, 0.30, 0.07, 1.0]),   // structural: ink, hot = orange
+    new Float32Array([0.36, 0.38, 0.44, 0.45, 0.36, 0.38, 0.44, 0.45]), // shear: muted grey
+    new Float32Array([0.76, 0.23, 0.02, 0.5, 0.76, 0.23, 0.02, 0.5])    // bend: deep orange
+  ];
+
+  // Fill and upload the per-frame geometry: interpolated positions, normals, per-point stress and the spring
+  // lines. Strain is computed once per spring and feeds both the stress colouring and the lines.
+  function buildGeometry(alpha) {
+    var P = posData, i, o, r, c, s;
+    for (i = 0, o = 0; i < N; i++, o += 3) {
+      P[o] = PX[i] + (X[i] - PX[i]) * alpha;
+      P[o + 1] = PY[i] + (Y[i] - PY[i]) * alpha;
+      P[o + 2] = PZ[i] + (Z[i] - PZ[i]) * alpha;
+    }
+    upload(gl.ARRAY_BUFFER, bufPos, P, N * 3);
+
+    if (showSurface) {
+      // per-vertex normals from the neighbouring points (central differences)
+      var NOR = norData;
+      for (r = 0; r < ROWS; r++) for (c = 0; c < COLS; c++) {
+        i = r * COLS + c;
+        var l = (c > 0 ? i - 1 : i) * 3, rt = (c < COLS - 1 ? i + 1 : i) * 3, u = (r > 0 ? i - COLS : i) * 3, d = (r < ROWS - 1 ? i + COLS : i) * 3;
+        var ax = P[rt] - P[l], ay = P[rt + 1] - P[l + 1], az = P[rt + 2] - P[l + 2];
+        var bx = P[d] - P[u], by = P[d + 1] - P[u + 1], bz = P[d + 2] - P[u + 2];
+        var nx = by * az - bz * ay, ny = bz * ax - bx * az, nz = bx * ay - by * ax;   // down x right: faces the viewer when hanging
+        var nl = 1 / (Math.sqrt(nx * nx + ny * ny + nz * nz) || 1);
+        o = i * 3; NOR[o] = nx * nl; NOR[o + 1] = ny * nl; NOR[o + 2] = nz * nl;
+      }
+      upload(gl.ARRAY_BUFFER, bufNor, NOR, N * 3);
+      stressData.fill(1);
+    }
+
+    // one pass over the springs: stress (the most-stretched structural spring touching each point, as
+    // length^2 / rest^2) and the line vertices, one buffer per kind, each vertex carrying the spring's strain
+    lineCount[0] = lineCount[1] = lineCount[2] = 0;
+    var wantStress = showSurface, wantStruct = showSprings, wantHidden = showHidden;
+    if (wantStress || wantStruct || wantHidden) {
+      var ST = stressData, L0 = lineData[0], L1 = lineData[1], L2 = lineData[2], n0 = 0, n1 = 0, n2 = 0;
+      for (s = 0; s < M; s++) {
+        var kd = KIND[s], isStruct = kd === KIND_STRUCT, line = isStruct ? wantStruct : wantHidden;
+        if (!line && !(isStruct && wantStress)) continue;
+        var a = SA[s], b = SB[s], a3 = a * 3, b3 = b * 3;
+        var x1 = P[a3], y1 = P[a3 + 1], z1 = P[a3 + 2], x2 = P[b3], y2 = P[b3 + 1], z2 = P[b3 + 2];
+        var dx = x2 - x1, dy = y2 - y1, dz = z2 - z1, st = (dx * dx + dy * dy + dz * dz) / RR[s];
+        if (isStruct && wantStress) { if (st > ST[a]) ST[a] = st; if (st > ST[b]) ST[b] = st; }
+        if (!line) continue;
+        var arr, lo;
+        if (kd === 0) { arr = L0; lo = n0 * 8; n0++; } else if (kd === 1) { arr = L1; lo = n1 * 8; n1++; } else { arr = L2; lo = n2 * 8; n2++; }
+        arr[lo] = x1; arr[lo + 1] = y1; arr[lo + 2] = z1; arr[lo + 3] = st;
+        arr[lo + 4] = x2; arr[lo + 5] = y2; arr[lo + 6] = z2; arr[lo + 7] = st;
+      }
+      lineCount[0] = n0; lineCount[1] = n1; lineCount[2] = n2;
+      if (wantStress) upload(gl.ARRAY_BUFFER, bufStress, ST, N);
+      for (var k = 0; k < 3; k++) if (lineCount[k]) upload(gl.ARRAY_BUFFER, bufLines[k], lineData[k], lineCount[k] * 8);
+    }
+  }
 
   function draw(alpha) {
-    var i, r, c, s;
-    // interpolate between the last two physics steps
-    for (i = 0; i < N; i++) {
-      RX[i] = PX[i] + (X[i] - PX[i]) * alpha;
-      RY[i] = PY[i] + (Y[i] - PY[i]) * alpha;
-      RZ[i] = PZ[i] + (Z[i] - PZ[i]) * alpha;
-      posData[i * 3] = RX[i]; posData[i * 3 + 1] = RY[i]; posData[i * 3 + 2] = RZ[i];
+    if (builtTopology !== topology) rebuildIndices();
+    if (builtPins !== pinsVersion) rebuildPins();
+    // Rebuild the geometry only if something it depends on changed. While the cloth sleeps and you orbit,
+    // this is skipped and a frame is just the GL draw calls with a new camera.
+    var flags = (showSurface ? 1 : 0) | (showSprings ? 2 : 0) | (showHidden ? 4 : 0);
+    if (geomVersion !== drawnGeom || topology !== drawnTopo || alpha !== drawnAlpha || flags !== drawnFlags) {
+      buildGeometry(alpha);
+      drawnGeom = geomVersion; drawnTopo = topology; drawnAlpha = alpha; drawnFlags = flags;
     }
 
     gl.viewport(0, 0, canvas.width, canvas.height);
@@ -566,32 +758,7 @@
     gl.depthMask(true);
     disableAttribs(lineProg);
 
-    if (builtTopology !== topology) rebuildIndices();
-
     if (showSurface && idxCount) {
-      // per-vertex normals from the neighbouring points (central differences)
-      for (r = 0; r < ROWS; r++) for (c = 0; c < COLS; c++) {
-        i = r * COLS + c;
-        var l = c > 0 ? i - 1 : i, rt = c < COLS - 1 ? i + 1 : i, u = r > 0 ? i - COLS : i, d = r < ROWS - 1 ? i + COLS : i;
-        var ax = RX[rt] - RX[l], ay = RY[rt] - RY[l], az = RZ[rt] - RZ[l];
-        var bx = RX[d] - RX[u], by = RY[d] - RY[u], bz = RZ[d] - RZ[u];
-        var nx = by * az - bz * ay, ny = bz * ax - bx * az, nz = bx * ay - by * ax;   // down x right: faces the viewer when hanging
-        var nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
-        norData[i * 3] = nx / nl; norData[i * 3 + 1] = ny / nl; norData[i * 3 + 2] = nz / nl;
-      }
-      // per-vertex stress: the most-stretched structural spring touching each point, as length^2 / rest^2
-      stressData.fill(1);
-      for (s = 0; s < M; s++) {
-        if (KIND[s] !== KIND_STRUCT) continue;
-        var sa = SA[s], sb = SB[s], ex = RX[sb] - RX[sa], ey = RY[sb] - RY[sa], ez = RZ[sb] - RZ[sa];
-        var st = (ex * ex + ey * ey + ez * ez) / RR[s];
-        if (st > stressData[sa]) stressData[sa] = st;
-        if (st > stressData[sb]) stressData[sb] = st;
-      }
-      gl.bindBuffer(gl.ARRAY_BUFFER, bufStress); gl.bufferData(gl.ARRAY_BUFFER, stressData, gl.DYNAMIC_DRAW);
-      gl.bindBuffer(gl.ARRAY_BUFFER, bufPos); gl.bufferData(gl.ARRAY_BUFFER, posData, gl.DYNAMIC_DRAW);
-      gl.bindBuffer(gl.ARRAY_BUFFER, bufNor); gl.bufferData(gl.ARRAY_BUFFER, norData, gl.DYNAMIC_DRAW);
-
       gl.useProgram(surfaceProg.p);
       gl.uniformMatrix4fv(surfaceProg.u.uVP, false, VP);
       gl.uniform3f(surfaceProg.u.uEye, EYE[0], EYE[1], EYE[2]);
@@ -619,73 +786,62 @@
       disableAttribs(surfaceProg);
     }
 
-    // springs: one vertex buffer per kind, each vertex carries the spring's squared strain
-    if (showSprings || showHidden) {
-      lineCount[0] = lineCount[1] = lineCount[2] = 0;
-      for (s = 0; s < M; s++) {
-        var kd = KIND[s];
-        if (kd === KIND_STRUCT ? !showSprings : !showHidden) continue;
-        var a = SA[s], b = SB[s];
-        var dx = RX[b] - RX[a], dy = RY[b] - RY[a], dz = RZ[b] - RZ[a];
-        var strain = (dx * dx + dy * dy + dz * dz) / RR[s];
-        var arr = lineData[kd], o = lineCount[kd] * 8;
-        arr[o] = RX[a]; arr[o + 1] = RY[a]; arr[o + 2] = RZ[a]; arr[o + 3] = strain;
-        arr[o + 4] = RX[b]; arr[o + 5] = RY[b]; arr[o + 6] = RZ[b]; arr[o + 7] = strain;
-        lineCount[kd]++;
-      }
+    // springs (bend, then shear, then structural on top)
+    if (lineCount[0] || lineCount[1] || lineCount[2]) {
       gl.useProgram(lineProg.p);
       gl.uniformMatrix4fv(lineProg.u.uVP, false, VP);
       gl.uniform3f(lineProg.u.uEye, EYE[0], EYE[1], EYE[2]); gl.uniform1f(lineProg.u.uPull, 1.5); gl.uniform1f(lineProg.u.uRound, 0);
-      var colors = [
-        [0.05, 0.06, 0.08, showSurface ? 0.55 : 0.8, 1.0, 0.30, 0.07, 1.0],   // structural: ink, hot = orange
-        [0.36, 0.38, 0.44, 0.45, 0.36, 0.38, 0.44, 0.45],                     // shear: muted grey
-        [0.76, 0.23, 0.02, 0.5, 0.76, 0.23, 0.02, 0.5]                        // bend: deep orange
-      ];
       for (var k = 2; k >= 0; k--) {
         if (!lineCount[k]) continue;
-        var col = colors[k];
-        gl.uniform4f(lineProg.u.uColor, col[0], col[1], col[2], col[3]);
+        var col = LINE_COLORS[k];
+        gl.uniform4f(lineProg.u.uColor, col[0], col[1], col[2], k === 0 ? (showSurface ? 0.55 : 0.8) : col[3]);
         gl.uniform4f(lineProg.u.uHot, col[4], col[5], col[6], col[7]);
-        gl.bindBuffer(gl.ARRAY_BUFFER, bufLines[k]);
-        gl.bufferData(gl.ARRAY_BUFFER, lineData[k].subarray(0, lineCount[k] * 8), gl.DYNAMIC_DRAW);
         attrib(lineProg, 'aPos', bufLines[k], 3, 16, 0); attrib(lineProg, 'aStrain', bufLines[k], 1, 16, 12);
         gl.drawArrays(gl.LINES, 0, lineCount[k] * 2);
       }
       disableAttribs(lineProg);
     }
 
-    // pins
-    pinCount = 0;
-    for (i = 0; i < N; i++) if (PIN[i]) { var po = pinCount * 4; pinData[po] = RX[i]; pinData[po + 1] = RY[i]; pinData[po + 2] = RZ[i]; pinData[po + 3] = 1; pinCount++; }
+    // pins: indexed straight out of the position buffer
     if (pinCount) {
       gl.useProgram(lineProg.p);
+      gl.uniformMatrix4fv(lineProg.u.uVP, false, VP);
       gl.uniform3f(lineProg.u.uEye, EYE[0], EYE[1], EYE[2]); gl.uniform1f(lineProg.u.uPull, 3); gl.uniform1f(lineProg.u.uPointSize, 7 * dpr); gl.uniform1f(lineProg.u.uRound, 1);
       gl.uniform4f(lineProg.u.uColor, 0.05, 0.06, 0.08, 1); gl.uniform4f(lineProg.u.uHot, 0.05, 0.06, 0.08, 1);
-      gl.bindBuffer(gl.ARRAY_BUFFER, bufPins); gl.bufferData(gl.ARRAY_BUFFER, pinData.subarray(0, pinCount * 4), gl.DYNAMIC_DRAW);
-      attrib(lineProg, 'aPos', bufPins, 3, 16, 0); attrib(lineProg, 'aStrain', bufPins, 1, 16, 12);
-      gl.drawArrays(gl.POINTS, 0, pinCount);
+      attrib(lineProg, 'aPos', bufPos, 3);
+      if (lineProg.a.aStrain !== undefined) gl.vertexAttrib1f(lineProg.a.aStrain, 0);   // disabled: constant
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufPinIdx);
+      gl.drawElements(gl.POINTS, pinCount, gl.UNSIGNED_SHORT, 0);
       disableAttribs(lineProg);
     }
 
     drawOverlay();
   }
 
-  // 2D overlay for the pointer feedback (hover ring, cut brush)
+  // 2D overlay for the pointer feedback (hover ring, cut brush). Skips the clear when it is already empty.
+  var overlayHasContent = true;
   function drawOverlay() {
+    var focus = grabbed >= 0 ? grabbed : (mode === 'grab' && pointer.inside && !pointer.down ? hover : -1);
+    var brush = pointer.cutting && pointer.inside;
+    if (focus < 0 && !brush && !overlayHasContent) return;
     octx.setTransform(1, 0, 0, 1, 0, 0);
     octx.clearRect(0, 0, overlay.width, overlay.height);
+    overlayHasContent = focus >= 0 || brush;
+    if (!overlayHasContent) return;
     octx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    var focus = grabbed >= 0 ? grabbed : (mode === 'grab' && pointer.inside && !pointer.down ? hover : -1);
     if (focus >= 0) {
-      var p = projectPoint(RX[focus], RY[focus], RZ[focus]);
+      var o = focus * 3, fx = posData[o], fy = posData[o + 1], fz = posData[o + 2];
+      projectPoint(fx, fy, fz);
+      var px = PP[0], py = PP[1];
       // the grab patch: a soft disc the size of GRAB_RADIUS on screen, plus a ring on the held point
-      var e = projectPoint(RX[focus] + GRAB_RADIUS, RY[focus], RZ[focus]), pr = Math.hypot(e[0] - p[0], e[1] - p[1]);
+      projectPoint(fx + GRAB_RADIUS, fy, fz);
+      var ex = PP[0] - px, ey = PP[1] - py, pr = Math.sqrt(ex * ex + ey * ey);
       octx.fillStyle = grabbed >= 0 ? 'rgba(255,77,18,0.16)' : 'rgba(255,77,18,0.09)';
-      octx.beginPath(); octx.arc(p[0], p[1], pr, 0, 6.2832); octx.fill();
+      octx.beginPath(); octx.arc(px, py, pr, 0, 6.2832); octx.fill();
       octx.strokeStyle = '#FF4D12'; octx.lineWidth = 2;
-      octx.beginPath(); octx.arc(p[0], p[1], grabbed >= 0 ? 7 : 5, 0, 6.2832); octx.stroke();
+      octx.beginPath(); octx.arc(px, py, grabbed >= 0 ? 7 : 5, 0, 6.2832); octx.stroke();
     }
-    if (pointer.cutting && pointer.inside) {
+    if (brush) {
       octx.fillStyle = 'rgba(255,77,18,0.18)';
       octx.beginPath(); octx.arc(pointer.x, pointer.y, 10, 0, 6.2832); octx.fill();
     }
@@ -703,7 +859,8 @@
   }
 
   /* ---------- Pointer interaction (all in CSS pixels of the canvas) ---------- */
-  function local(e) { var rect = canvas.getBoundingClientRect(); return [e.clientX - rect.left, e.clientY - rect.top]; }
+  var LX = 0, LY = 0;   // local(e) writes the event's canvas position here
+  function local(e) { var rect = canvas.getBoundingClientRect(); LX = e.clientX - rect.left; LY = e.clientY - rect.top; }
   function nearestPoint(sx, sy) {
     projectAll();
     var best = -1, bestD = GRAB_RADIUS_PX * GRAB_RADIUS_PX;
@@ -722,17 +879,18 @@
   }
   function cutAlong(x1, y1, x2, y2) {
     projectAll();
-    var edges = [], changed = false;
+    var changed = false;
     for (var s = 0; s < M; s++) {
       var a = SA[s], b = SB[s];
       var mx = (SXp[a] + SXp[b]) / 2 - x2, my = (SYp[a] + SYp[b]) / 2 - y2;
       if (mx * mx + my * my < 49 || segIntersect(x1, y1, x2, y2, SXp[a], SYp[a], SXp[b], SYp[b])) {
-        if (KIND[s] === KIND_STRUCT) edges.push(REF1[s]);
-        else { removeSpring(s); s--; changed = true; }
+        if (KIND[s] === KIND_STRUCT) breakEdge(REF1[s]);   // marked now, removed by the sweep below
+        else { removeSpring(s); s--; }
+        changed = true;
       }
     }
-    for (var i = 0; i < edges.length; i++) breakEdge(edges[i]);
-    if (edges.length || changed) wake();
+    if (needSweep) sweepSprings();
+    if (changed) { topology++; wake(); }
   }
   function updateCursor() {
     canvas.classList.toggle('cut', mode === 'cut' || pointer.cutting);
@@ -740,35 +898,39 @@
   }
 
   canvas.addEventListener('pointerdown', function (e) {
-    var p = local(e);
-    pointer.x = p[0]; pointer.y = p[1]; pointer.vx = pointer.vy = pointer.vz = 0; pointer.t = e.timeStamp;
+    local(e);
+    var px = LX, py = LY;
+    pointer.x = px; pointer.y = py; pointer.vx = pointer.vy = pointer.vz = 0; pointer.t = e.timeStamp;
     pointer.down = true; pointer.inside = true;
     try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
     pointer.cutting = mode === 'cut' || e.button === 2 || e.shiftKey;
-    if (pointer.cutting) cutAlong(p[0], p[1], p[0], p[1]);
+    if (pointer.cutting) cutAlong(px, py, px, py);
     else {
-      grabbed = nearestPoint(p[0], p[1]);
+      grabbed = nearestPoint(px, py);
       if (grabbed >= 0) {
         INV[grabbed] = 0;
         grabArea(grabbed);
         target.x = pointer.wx = X[grabbed]; target.y = pointer.wy = Y[grabbed]; target.z = pointer.wz = Z[grabbed];
       } else pointer.orbiting = true;              // empty space: orbit the camera
     }
-    wake(); updateCursor();
+    // orbiting a settled cloth only redraws the cached geometry from a new camera; anything else wakes the solver
+    if (pointer.orbiting) dirty = true; else wake();
+    updateCursor();
     e.preventDefault();
   });
   canvas.addEventListener('pointermove', function (e) {
-    var p = local(e), dx = p[0] - pointer.x, dy = p[1] - pointer.y;
+    local(e);
+    var px = LX, py = LY, dx = px - pointer.x, dy = py - pointer.y;
     pointer.inside = true;
     if (pointer.down) {
-      if (pointer.cutting) cutAlong(pointer.x, pointer.y, p[0], p[1]);
+      if (pointer.cutting) cutAlong(pointer.x, pointer.y, px, py);
       else if (pointer.orbiting) {
         cam.yaw -= dx * 0.0035;
         cam.pitch = Math.max(-0.05, Math.min(1.1, cam.pitch + dy * 0.003));
         updateCamera();
       } else if (grabbed >= 0) {
         // drag within the plane that faces the camera and passes through the held point
-        var w = unprojectToPlane(p[0], p[1], target.x, target.y, target.z);
+        var w = unprojectToPlane(px, py, target.x, target.y, target.z);
         var dt = Math.max(e.timeStamp - pointer.t, 1) / 1000;
         pointer.vx = pointer.vx * 0.6 + (w[0] - target.x) / dt * 0.4;
         pointer.vy = pointer.vy * 0.6 + (w[1] - target.y) / dt * 0.4;
@@ -777,34 +939,37 @@
       }
       dirty = true;
     } else if (mode === 'grab') {
-      var h = nearestPoint(p[0], p[1]);
-      if (h !== hover) { hover = h; dirty = true; }
+      var h = nearestPoint(px, py);
+      if (h !== hover) { hover = h; overlayDirty = true; }   // only the hover ring changes
     }
     pointer.t = e.timeStamp;
-    pointer.x = p[0]; pointer.y = p[1];
+    pointer.x = px; pointer.y = py;
   });
+  function clampSpeed(v) { return v < -4000 ? -4000 : v > 4000 ? 4000 : v; }
   function release() {
+    var touched = grabbed >= 0 || pointer.cutting;   // orbiting never touches the cloth, so it needn't wake the solver
     if (grabbed >= 0) {
       var g = grabbed;
       if (PIN[g]) { PX[g] = X[g]; PY[g] = Y[g]; PZ[g] = Z[g]; }
       else {
         // carry the pointer's velocity into the cloth so it can be thrown
-        var cl = function (v) { return Math.max(-4000, Math.min(4000, v)); };
-        PX[g] = X[g] - cl(pointer.vx) * STEP; PY[g] = Y[g] - cl(pointer.vy) * STEP; PZ[g] = Z[g] - cl(pointer.vz) * STEP;
+        PX[g] = X[g] - clampSpeed(pointer.vx) * STEP; PY[g] = Y[g] - clampSpeed(pointer.vy) * STEP; PZ[g] = Z[g] - clampSpeed(pointer.vz) * STEP;
         INV[g] = 1;
       }
     }
     grabbed = -1; grabCount = 0; pointer.down = false; pointer.cutting = false; pointer.orbiting = false;
-    wake(); updateCursor();
+    if (touched) wake(); else dirty = true;
+    updateCursor();
   }
   canvas.addEventListener('pointerup', release);
   canvas.addEventListener('pointercancel', release);
-  canvas.addEventListener('pointerleave', function () { if (!pointer.down) { pointer.inside = false; hover = -1; dirty = true; } });
+  canvas.addEventListener('pointerleave', function () { if (!pointer.down) { pointer.inside = false; hover = -1; overlayDirty = true; } });
   canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
   canvas.addEventListener('dblclick', function (e) {
-    var p = local(e), i = nearestPoint(p[0], p[1]);
+    local(e);
+    var i = nearestPoint(LX, LY);
     if (i < 0) return;
-    PIN[i] = PIN[i] ? 0 : 1;
+    PIN[i] = PIN[i] ? 0 : 1; pinsVersion++;
     INV[i] = PIN[i] ? 0 : 1;
     PX[i] = X[i]; PY[i] = Y[i]; PZ[i] = Z[i];
     wake();
@@ -875,7 +1040,7 @@
   /* ---------- Loop ---------- */
   var sPoints = byId('sPoints'), sLinks = byId('sLinks'), sFps = byId('sFps'), sMs = byId('sMs');
   var acc = 0, last = performance.now(), frames = 0, fpsT = last, visible = true;
-  var simMs = 0, drawMs = 0, worked = 0;
+  var simMs = 0, drawMs = 0, worked = 0, shownN = -1, shownM = -1, shownIdle = false;
   if ('IntersectionObserver' in window) new IntersectionObserver(function (en) { visible = en[0].isIntersecting; }).observe(canvas);
 
   function frame(now) {
@@ -899,16 +1064,22 @@
       var t1 = performance.now();
       if (!asleep || dirty) {
         draw(asleep ? 1 : acc / STEP);
-        dirty = false;
+        dirty = overlayDirty = false;
         var t2 = performance.now();
         simMs += t1 - t0; drawMs += t2 - t1; worked++;
+      } else if (overlayDirty) {
+        drawOverlay();   // asleep and only the hover ring moved: leave the WebGL frame as it is
+        overlayDirty = false;
       }
     }
     if (now - fpsT > 500) {
-      sPoints.textContent = N;
-      sLinks.textContent = M;
-      if (asleep) { sFps.textContent = '—'; sMs.textContent = 'idle'; sMs.title = 'Cloth has settled; the solver is paused until you touch it.'; }
-      else if (worked) {
+      // touch the DOM only when a value changed (each write builds a string and may restyle)
+      if (N !== shownN) sPoints.textContent = shownN = N;
+      if (M !== shownM) sLinks.textContent = shownM = M;
+      if (asleep) {
+        if (!shownIdle) { sFps.textContent = '—'; sMs.textContent = 'idle'; sMs.title = 'Cloth has settled; the solver is paused until you touch it.'; shownIdle = true; }
+      } else if (worked) {
+        shownIdle = false;
         var msPerFrame = (simMs + drawMs) / worked;
         sMs.textContent = msPerFrame.toFixed(2);
         // theoretical frame rate if only our own CPU work limited it (display refresh normally caps it)
