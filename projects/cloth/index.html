@@ -145,6 +145,7 @@ footer a:hover { color: var(--ink); }
           <span><b id="sPoints">0</b> points</span>
           <span><b id="sLinks">0</b> springs</span>
           <span><b id="sFps">0</b> fps</span>
+          <span title="CPU time per frame"><b id="sMs">0</b> ms/frame</span>
         </div>
       </div>
       <div class="stage">
@@ -178,7 +179,7 @@ footer a:hover { color: var(--ink); }
 
     <div class="origin">
       <b>Original</b>
-      <p>I first wrote this in Luau for Roblox: the cloth is an EditableMesh whose vertices are driven by the solver, with sphere and cylinder colliders, a custom vector type to cut allocation, and a benchmarking mode. Rendering the mesh, not the physics, turned out to be the bottleneck. This page is a lightweight JavaScript port of the same solver, drawn as plain lines on a canvas.</p>
+      <p>I first wrote this in Luau for Roblox: the cloth is an EditableMesh whose vertices are driven by the solver, with sphere and cylinder colliders, a custom vector type to cut allocation, and a benchmarking mode. Rendering the mesh, not the physics, turned out to be the bottleneck. This page is a lightweight JavaScript port of the same solver, drawn as plain lines on a canvas. It keeps the cloth in flat typed arrays, uses a square-root-free spring correction, interpolates between physics steps for high-refresh displays, and puts the solver to sleep once the cloth settles, so a frame costs well under a millisecond.</p>
     </div>
   </div>
 </main>
@@ -203,15 +204,27 @@ footer a:hover { color: var(--ink); }
   var TEAR_RATIO = 3;            // spring snaps beyond this multiple of rest length
   var GRAB_RADIUS_PX = 30;       // pointer pick radius in CSS pixels
   var MAX_GRAB_SPEED = 1800;     // world units / s a held point can travel
+  var SLEEP_FRAMES = 60;         // frames of near-stillness before the solver idles
+  var SLEEP_MOTION = 0.05;       // max per-step movement (world units) that counts as still (~0.06 px)
+
+  /* ---------- State: flat typed arrays (struct-of-arrays) instead of objects ---------- */
+  var N = COLS * ROWS;
+  var MAX_SPRINGS = (COLS - 1) * ROWS + COLS * (ROWS - 1);
+  var L = SPACING, L2 = L * L, TEAR2 = L2 * TEAR_RATIO * TEAR_RATIO;
+  var X = new Float64Array(N), Y = new Float64Array(N);      // current positions
+  var PX = new Float64Array(N), PY = new Float64Array(N);    // previous positions (Verlet)
+  var INV = new Float64Array(N);                              // inverse mass: 0 = pinned or held
+  var PIN = new Uint8Array(N);
+  var SA = new Int32Array(MAX_SPRINGS), SB = new Int32Array(MAX_SPRINGS);
+  var M = 0;                                                  // live springs, kept dense in [0, M)
 
   var canvas = document.getElementById('cloth');
   var ctx = canvas.getContext('2d');
-  var points = [], springs = [];
   var scale = 1, dpr = 1;
   var mode = 'grab', wind = false, tearing = true;
-  var grabbed = null, hover = null;
-  var pointer = { x: 0, y: 0, lx: 0, ly: 0, vx: 0, vy: 0, down: false, cutting: false, inside: false };
-  var simTime = 0;
+  var grabbed = -1, hover = -1;
+  var pointer = { x: 0, y: 0, vx: 0, vy: 0, t: 0, down: false, cutting: false, inside: false };
+  var simTime = 0, still = 0, asleep = false, dirty = true;
 
   function isPinnedColumn(c) {
     // same pattern as the Luau original: two points at each top corner plus the middle
@@ -219,130 +232,152 @@ footer a:hover { color: var(--ink); }
   }
 
   function build() {
-    points = []; springs = [];
-    var x0 = (W - (COLS - 1) * SPACING) / 2, y0 = 54;
-    for (var r = 0; r < ROWS; r++) {
-      for (var c = 0; c < COLS; c++) {
-        var x = x0 + c * SPACING, y = y0 + r * SPACING;
-        points.push({ x: x, y: y, px: x, py: y, pinned: r === 0 && isPinnedColumn(c) });
-      }
-    }
+    var x0 = (W - (COLS - 1) * SPACING) / 2, y0 = 54, r, c, i;
     for (r = 0; r < ROWS; r++) {
       for (c = 0; c < COLS; c++) {
-        var i = r * COLS + c;
-        if (c < COLS - 1) springs.push({ a: points[i], b: points[i + 1], len: SPACING, on: true, strain: 1 });
-        if (r < ROWS - 1) springs.push({ a: points[i], b: points[i + COLS], len: SPACING, on: true, strain: 1 });
+        i = r * COLS + c;
+        X[i] = PX[i] = x0 + c * SPACING;
+        Y[i] = PY[i] = y0 + r * SPACING;
+        PIN[i] = (r === 0 && isPinnedColumn(c)) ? 1 : 0;
+        INV[i] = PIN[i] ? 0 : 1;
       }
     }
-    grabbed = null; hover = null;
+    M = 0;
+    for (r = 0; r < ROWS; r++) {
+      for (c = 0; c < COLS; c++) {
+        i = r * COLS + c;
+        if (c < COLS - 1) { SA[M] = i; SB[M] = i + 1; M++; }
+        if (r < ROWS - 1) { SA[M] = i; SB[M] = i + COLS; M++; }
+      }
+    }
+    grabbed = -1; hover = -1;
+    wake();
   }
 
-  /* ---------- Physics ---------- */
-  function fixed(p) { return p.pinned || p === grabbed; }
+  function wake() { asleep = false; still = 0; dirty = true; }
+  function removeSpring(s) { M--; SA[s] = SA[M]; SB[s] = SB[M]; }   // swap-remove keeps [0, M) dense
 
+  /* ---------- Physics ---------- */
+  // Pull a stretched spring back toward its rest length, split by inverse mass.
+  // Square-root-free (Jakobsen): (d - L) / d  ~  (d^2 - L^2) / (d^2 + L^2).
+  // Springs only resist stretching, matching the Luau original, so the cloth can bunch and fold.
+  function relax(s) {
+    var a = SA[s], b = SB[s];
+    var dx = X[b] - X[a], dy = Y[b] - Y[a], d2 = dx * dx + dy * dy;
+    if (d2 <= L2) return;
+    var wa = INV[a], wb = INV[b], w = wa + wb;
+    if (w === 0) return;
+    var k = (d2 - L2) / ((d2 + L2) * w), ox = dx * k, oy = dy * k;
+    X[a] += ox * wa; Y[a] += oy * wa;
+    X[b] -= ox * wb; Y[b] -= oy * wb;
+  }
+
+  // Returns the largest distance any point moved this step (used to put the solver to sleep).
   function step(dt) {
     simTime += dt;
-    var dt2 = dt * dt, gust = 0;
-    if (wind) gust = 520 + Math.sin(simTime * 0.9) * 300 + Math.sin(simTime * 2.3 + 1.7) * 160;
+    var dt2 = dt * dt, gy = GRAVITY * dt2, i, s, x, y, nx, ny, it;
 
-    for (var i = 0; i < points.length; i++) {
-      var p = points[i];
-      if (fixed(p)) continue;
-      var vx = (p.x - p.px) * DAMPING, vy = (p.y - p.py) * DAMPING;
-      p.px = p.x; p.py = p.y;
-      var ax = 0, ay = GRAVITY;
-      if (wind) {
-        var ripple = 0.55 + 0.45 * Math.sin(simTime * 3.1 + p.y * 0.021 + p.x * 0.004);
-        ax += gust * ripple; ay -= gust * 0.18 * ripple;
+    // 1. Verlet integration: velocity is implied by (current - previous)
+    if (wind) {
+      var gust = (520 + Math.sin(simTime * 0.9) * 300 + Math.sin(simTime * 2.3 + 1.7) * 160) * dt2, t3 = simTime * 3.1;
+      for (i = 0; i < N; i++) {
+        if (INV[i] === 0) continue;
+        x = X[i]; y = Y[i];
+        var rip = gust * (0.55 + 0.45 * Math.sin(t3 + y * 0.021 + x * 0.004));
+        nx = x + (x - PX[i]) * DAMPING + rip;
+        ny = y + (y - PY[i]) * DAMPING + gy - rip * 0.18;
+        PX[i] = x; PY[i] = y; X[i] = nx; Y[i] = ny;
       }
-      p.x += vx + ax * dt2;
-      p.y += vy + ay * dt2;
-    }
-
-    if (grabbed) {
-      // chase the pointer at a capped speed so a fast flick tugs the cloth instead of teleporting a point
-      grabbed.px = grabbed.x; grabbed.py = grabbed.y;
-      var gx = pointer.x - grabbed.x, gy = pointer.y - grabbed.y, gd = Math.sqrt(gx * gx + gy * gy);
-      var maxMove = MAX_GRAB_SPEED * dt;
-      if (gd > maxMove) { gx *= maxMove / gd; gy *= maxMove / gd; }
-      grabbed.x += gx; grabbed.y += gy;
-    }
-
-    for (var it = 0; it < ITERATIONS; it++) {
-      for (var s = 0; s < springs.length; s++) {
-        var sp = springs[s];
-        if (!sp.on) continue;
-        var a = sp.a, b = sp.b;
-        var dx = b.x - a.x, dy = b.y - a.y;
-        var d = Math.sqrt(dx * dx + dy * dy) || 1e-6;
-        if (it === 0) sp.strain = d / sp.len;
-        if (d <= sp.len) continue;                     // springs resist stretch only
-        if (tearing && d > sp.len * TEAR_RATIO) { sp.on = false; continue; }
-        var fa = !fixed(a), fb = !fixed(b);
-        if (!fa && !fb) continue;
-        var k = (d - sp.len) / d, ox = dx * k, oy = dy * k;
-        if (fa && fb) { a.x += ox * 0.5; a.y += oy * 0.5; b.x -= ox * 0.5; b.y -= oy * 0.5; }
-        else if (fa) { a.x += ox; a.y += oy; }
-        else { b.x -= ox; b.y -= oy; }
+    } else {
+      for (i = 0; i < N; i++) {
+        if (INV[i] === 0) continue;
+        x = X[i]; y = Y[i];
+        nx = x + (x - PX[i]) * DAMPING;
+        ny = y + (y - PY[i]) * DAMPING + gy;
+        PX[i] = x; PY[i] = y; X[i] = nx; Y[i] = ny;
       }
     }
 
-    // keep everything inside the stage; the floor has friction
-    for (i = 0; i < points.length; i++) {
-      p = points[i];
-      if (p.x < 0) { p.x = 0; p.px = p.x + (p.x - p.px) * 0.5; }
-      else if (p.x > W) { p.x = W; p.px = p.x + (p.x - p.px) * 0.5; }
-      if (p.y > H) { p.y = H; p.py = H; p.px = p.x - (p.x - p.px) * 0.6; }
-      else if (p.y < 0) { p.y = 0; p.py = 0; }
+    // 2. Held point chases the pointer at a capped speed, so a flick tugs instead of teleporting
+    if (grabbed >= 0) {
+      var g = grabbed, gx = pointer.x - X[g], gyy = pointer.y - Y[g], gd2 = gx * gx + gyy * gyy, maxMove = MAX_GRAB_SPEED * dt;
+      PX[g] = X[g]; PY[g] = Y[g];
+      if (gd2 > maxMove * maxMove) { var f = maxMove / Math.sqrt(gd2); gx *= f; gyy *= f; }
+      X[g] += gx; Y[g] += gyy;
     }
+
+    // 3. Constraint relaxation. The first pass also tears over-stretched springs;
+    //    later passes alternate direction (symmetric Gauss-Seidel converges faster).
+    for (s = 0; s < M; s++) {
+      if (tearing) {
+        var a = SA[s], b = SB[s], dx = X[b] - X[a], dy = Y[b] - Y[a];
+        if (dx * dx + dy * dy > TEAR2) { removeSpring(s); s--; continue; }
+      }
+      relax(s);
+    }
+    for (it = 1; it < ITERATIONS; it++) {
+      if (it & 1) { for (s = M - 1; s >= 0; s--) relax(s); }
+      else { for (s = 0; s < M; s++) relax(s); }
+    }
+
+    // 4. Keep everything inside the stage (the floor has friction) and measure motion
+    var maxMotion = 0;
+    for (i = 0; i < N; i++) {
+      x = X[i]; y = Y[i];
+      if (x < 0) { X[i] = 0; PX[i] = -PX[i] * 0.5; }
+      else if (x > W) { X[i] = W; PX[i] = W + (W - PX[i]) * 0.5; }
+      if (y > H) { Y[i] = H; PY[i] = H; PX[i] = X[i] - (X[i] - PX[i]) * 0.6; }
+      else if (y < 0) { Y[i] = 0; PY[i] = 0; }
+      var m = Math.abs(X[i] - PX[i]) + Math.abs(Y[i] - PY[i]);
+      if (m > maxMotion) maxMotion = m;
+    }
+    return maxMotion;
   }
 
   /* ---------- Rendering ---------- */
-  var INK = '#0D1015', ACCENT = '#FF4D12';
-  function draw() {
+  // Positions are interpolated between the last two physics steps, so motion stays smooth
+  // on 90/120/144 Hz displays even though physics runs at a fixed 120 Hz.
+  var RX = new Float64Array(N), RY = new Float64Array(N);
+  var STRAIN_MID = 1.25 * 1.25 * L2, STRAIN_HIGH = 1.9 * 1.9 * L2;   // compared against squared length
+  var COLORS = ['rgba(13,16,21,0.78)', 'rgba(194,58,6,0.85)', '#FF4D12'];
+
+  function draw(alpha) {
+    var i, s, a, b, dx, dy, d2;
+    for (i = 0; i < N; i++) {
+      RX[i] = PX[i] + (X[i] - PX[i]) * alpha;
+      RY[i] = PY[i] + (Y[i] - PY[i]) * alpha;
+    }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
-    ctx.lineCap = 'round';
     ctx.lineWidth = 1.25 / scale;
 
-    // bucket springs by strain so the whole cloth is a handful of strokes
-    var buckets = [[], [], []];
-    for (var s = 0; s < springs.length; s++) {
-      var sp = springs[s];
-      if (!sp.on) continue;
-      buckets[sp.strain < 1.25 ? 0 : sp.strain < 1.9 ? 1 : 2].push(sp);
+    // one pass over the springs, three paths bucketed by strain, three stroke calls total
+    var p0 = new Path2D(), p1 = null, p2 = null;
+    for (s = 0; s < M; s++) {
+      a = SA[s]; b = SB[s];
+      dx = X[b] - X[a]; dy = Y[b] - Y[a]; d2 = dx * dx + dy * dy;
+      var p = d2 < STRAIN_MID ? p0 : d2 < STRAIN_HIGH ? (p1 || (p1 = new Path2D())) : (p2 || (p2 = new Path2D()));
+      p.moveTo(RX[a], RY[a]); p.lineTo(RX[b], RY[b]);
     }
-    var styles = ['rgba(13,16,21,0.78)', 'rgba(194,58,6,0.85)', ACCENT];
-    for (var bi = 0; bi < 3; bi++) {
-      if (!buckets[bi].length) continue;
-      ctx.strokeStyle = styles[bi];
-      ctx.beginPath();
-      for (var j = 0; j < buckets[bi].length; j++) {
-        var q = buckets[bi][j];
-        ctx.moveTo(q.a.x, q.a.y); ctx.lineTo(q.b.x, q.b.y);
-      }
-      ctx.stroke();
-    }
+    ctx.strokeStyle = COLORS[0]; ctx.stroke(p0);
+    if (p1) { ctx.strokeStyle = COLORS[1]; ctx.stroke(p1); }
+    if (p2) { ctx.strokeStyle = COLORS[2]; ctx.stroke(p2); }
 
-    // pins
-    ctx.fillStyle = INK;
-    var pr = 3.6 / scale;
-    for (var i = 0; i < points.length; i++) {
-      var p = points[i];
-      if (!p.pinned) continue;
-      ctx.beginPath(); ctx.arc(p.x, p.y, pr, 0, Math.PI * 2); ctx.fill();
-    }
+    // pins, batched into one fill
+    var r = 3.6 / scale, pins = new Path2D();
+    for (i = 0; i < N; i++) if (PIN[i]) { pins.moveTo(RX[i] + r, RY[i]); pins.arc(RX[i], RY[i], r, 0, 6.2832); }
+    ctx.fillStyle = '#0D1015'; ctx.fill(pins);
 
     // hover / grab indicator
-    var focus = grabbed || (mode === 'grab' && pointer.inside && !pointer.down ? hover : null);
-    if (focus) {
-      ctx.strokeStyle = ACCENT; ctx.lineWidth = 2 / scale;
-      ctx.beginPath(); ctx.arc(focus.x, focus.y, (grabbed ? 9 : 7) / scale, 0, Math.PI * 2); ctx.stroke();
+    var focus = grabbed >= 0 ? grabbed : (mode === 'grab' && pointer.inside && !pointer.down ? hover : -1);
+    if (focus >= 0) {
+      ctx.strokeStyle = '#FF4D12'; ctx.lineWidth = 2 / scale;
+      ctx.beginPath(); ctx.arc(RX[focus], RY[focus], (grabbed >= 0 ? 9 : 7) / scale, 0, 6.2832); ctx.stroke();
     }
     if (pointer.cutting && pointer.inside) {
       ctx.fillStyle = 'rgba(255,77,18,0.18)';
-      ctx.beginPath(); ctx.arc(pointer.x, pointer.y, 10 / scale, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(pointer.x, pointer.y, 10 / scale, 0, 6.2832); ctx.fill();
     }
   }
 
@@ -353,7 +388,7 @@ footer a:hover { color: var(--ink); }
     scale = rect.width / W;
     canvas.width = Math.max(1, Math.round(rect.width * dpr));
     canvas.height = Math.max(1, Math.round(rect.height * dpr));
-    draw();
+    dirty = true;
   }
 
   /* ---------- Pointer interaction ---------- */
@@ -362,10 +397,10 @@ footer a:hover { color: var(--ink); }
     return { x: (e.clientX - rect.left) / rect.width * W, y: (e.clientY - rect.top) / rect.height * H };
   }
   function nearestPoint(x, y) {
-    var best = null, bestD = Math.pow(GRAB_RADIUS_PX / scale, 2);
-    for (var i = 0; i < points.length; i++) {
-      var dx = points[i].x - x, dy = points[i].y - y, d = dx * dx + dy * dy;
-      if (d < bestD) { bestD = d; best = points[i]; }
+    var best = -1, bestD = Math.pow(GRAB_RADIUS_PX / scale, 2);
+    for (var i = 0; i < N; i++) {
+      var dx = X[i] - x, dy = Y[i] - y, d = dx * dx + dy * dy;
+      if (d < bestD) { bestD = d; best = i; }
     }
     return best;
   }
@@ -377,64 +412,74 @@ footer a:hover { color: var(--ink); }
     return t >= 0 && t <= 1 && u >= 0 && u <= 1;
   }
   function cutAlong(x1, y1, x2, y2) {
-    var r2 = Math.pow(7 / scale, 2);
-    for (var s = 0; s < springs.length; s++) {
-      var sp = springs[s];
-      if (!sp.on) continue;
-      if (segIntersect(x1, y1, x2, y2, sp.a.x, sp.a.y, sp.b.x, sp.b.y)) { sp.on = false; continue; }
-      var mx = (sp.a.x + sp.b.x) / 2 - x2, my = (sp.a.y + sp.b.y) / 2 - y2;
-      if (mx * mx + my * my < r2) sp.on = false;
+    var r2 = Math.pow(7 / scale, 2), cut = false;
+    for (var s = 0; s < M; s++) {
+      var a = SA[s], b = SB[s];
+      var mx = (X[a] + X[b]) / 2 - x2, my = (Y[a] + Y[b]) / 2 - y2;
+      if (mx * mx + my * my < r2 || segIntersect(x1, y1, x2, y2, X[a], Y[a], X[b], Y[b])) { removeSpring(s); s--; cut = true; }
     }
+    if (cut) wake();
   }
   function updateCursor() {
     canvas.classList.toggle('cut', mode === 'cut' || pointer.cutting);
-    canvas.classList.toggle('dragging', !!grabbed);
+    canvas.classList.toggle('dragging', grabbed >= 0);
   }
 
   canvas.addEventListener('pointerdown', function (e) {
     var w = toWorld(e);
-    pointer.x = pointer.lx = w.x; pointer.y = pointer.ly = w.y; pointer.vx = pointer.vy = 0;
+    pointer.x = w.x; pointer.y = w.y; pointer.vx = pointer.vy = 0; pointer.t = e.timeStamp;
     pointer.down = true; pointer.inside = true;
     try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
     pointer.cutting = mode === 'cut' || e.button === 2 || e.shiftKey;
     if (pointer.cutting) cutAlong(w.x, w.y, w.x, w.y);
-    else grabbed = nearestPoint(w.x, w.y);
-    updateCursor();
+    else {
+      grabbed = nearestPoint(w.x, w.y);
+      if (grabbed >= 0) INV[grabbed] = 0;
+    }
+    wake(); updateCursor();
     e.preventDefault();
   });
   canvas.addEventListener('pointermove', function (e) {
     var w = toWorld(e);
     pointer.inside = true;
     if (pointer.down) {
-      var dt = Math.max(e.timeStamp - (pointer.t || e.timeStamp), 1) / 1000;
+      var dt = Math.max(e.timeStamp - pointer.t, 1) / 1000;
       pointer.vx = pointer.vx * 0.6 + (w.x - pointer.x) / dt * 0.4;
       pointer.vy = pointer.vy * 0.6 + (w.y - pointer.y) / dt * 0.4;
       if (pointer.cutting) cutAlong(pointer.x, pointer.y, w.x, w.y);
+      dirty = true;
     } else if (mode === 'grab') {
-      hover = nearestPoint(w.x, w.y);
+      var h = nearestPoint(w.x, w.y);
+      if (h !== hover) { hover = h; dirty = true; }
     }
     pointer.t = e.timeStamp;
     pointer.x = w.x; pointer.y = w.y;
   });
   function release() {
-    if (grabbed) {
-      if (grabbed.pinned) { grabbed.px = grabbed.x; grabbed.py = grabbed.y; }
+    if (grabbed >= 0) {
+      var g = grabbed;
+      if (PIN[g]) { PX[g] = X[g]; PY[g] = Y[g]; }
       else {
         // carry the pointer's velocity into the cloth so it can be thrown
         var vx = Math.max(-4000, Math.min(4000, pointer.vx)), vy = Math.max(-4000, Math.min(4000, pointer.vy));
-        grabbed.px = grabbed.x - vx * STEP; grabbed.py = grabbed.y - vy * STEP;
+        PX[g] = X[g] - vx * STEP; PY[g] = Y[g] - vy * STEP;
+        INV[g] = 1;
       }
     }
-    grabbed = null; pointer.down = false; pointer.cutting = false;
-    updateCursor();
+    grabbed = -1; pointer.down = false; pointer.cutting = false;
+    wake(); updateCursor();
   }
   canvas.addEventListener('pointerup', release);
   canvas.addEventListener('pointercancel', release);
-  canvas.addEventListener('pointerleave', function () { if (!pointer.down) { pointer.inside = false; hover = null; } });
+  canvas.addEventListener('pointerleave', function () { if (!pointer.down) { pointer.inside = false; hover = -1; dirty = true; } });
   canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
   canvas.addEventListener('dblclick', function (e) {
-    var w = toWorld(e), p = nearestPoint(w.x, w.y);
-    if (p) { p.pinned = !p.pinned; p.px = p.x; p.py = p.y; }
+    var w = toWorld(e), i = nearestPoint(w.x, w.y);
+    if (i < 0) return;
+    PIN[i] = PIN[i] ? 0 : 1;
+    INV[i] = PIN[i] ? 0 : 1;
+    PX[i] = X[i]; PY[i] = Y[i];
+    wake();
   });
 
   /* ---------- Controls ---------- */
@@ -444,9 +489,9 @@ footer a:hover { color: var(--ink); }
     mode = m;
     bGrab.setAttribute('aria-pressed', String(m === 'grab'));
     bCut.setAttribute('aria-pressed', String(m === 'cut'));
-    hover = null; updateCursor();
+    hover = -1; dirty = true; updateCursor();
   }
-  function toggleWind() { wind = !wind; bWind.setAttribute('aria-pressed', String(wind)); }
+  function toggleWind() { wind = !wind; bWind.setAttribute('aria-pressed', String(wind)); wake(); }
   function toggleTear() { tearing = !tearing; bTear.setAttribute('aria-pressed', String(tearing)); }
   bGrab.addEventListener('click', function () { setMode('grab'); });
   bCut.addEventListener('click', function () { setMode('cut'); });
@@ -466,28 +511,46 @@ footer a:hover { color: var(--ink); }
   });
 
   /* ---------- Loop ---------- */
-  var sPoints = document.getElementById('sPoints'), sLinks = document.getElementById('sLinks'), sFps = document.getElementById('sFps');
+  var sPoints = document.getElementById('sPoints'), sLinks = document.getElementById('sLinks');
+  var sFps = document.getElementById('sFps'), sMs = document.getElementById('sMs');
   var acc = 0, last = performance.now(), frames = 0, fpsT = last, visible = true;
+  var simMs = 0, drawMs = 0, worked = 0;
   if ('IntersectionObserver' in window) new IntersectionObserver(function (en) { visible = en[0].isIntersecting; }).observe(canvas);
 
   function frame(now) {
     var dt = Math.min((now - last) / 1000, 0.05);
     last = now;
+    frames++;
     if (visible && !document.hidden) {
-      acc += dt;
-      var n = 0;
-      while (acc >= STEP && n < 8) { step(STEP); acc -= STEP; n++; }
-      if (n === 8) acc = 0;
-      draw();
-      frames++;
+      var t0 = performance.now(), n = 0, motion = 0;
+      if (!asleep) {
+        acc += dt;
+        while (acc >= STEP && n < 8) { motion = Math.max(motion, step(STEP)); acc -= STEP; n++; }
+        if (n === 8) acc = 0;
+        // idle the solver once the cloth has settled and nobody is touching it
+        if (n > 0) {
+          if (!wind && grabbed < 0 && !pointer.down && motion < SLEEP_MOTION) { if (++still > SLEEP_FRAMES) asleep = true; }
+          else still = 0;
+        }
+      }
+      var t1 = performance.now();
+      if (!asleep || dirty) {
+        draw(asleep ? 1 : acc / STEP);
+        dirty = false;
+        var t2 = performance.now();
+        simMs += t1 - t0; drawMs += t2 - t1; worked++;
+      }
     }
     if (now - fpsT > 500) {
-      var active = 0;
-      for (var s = 0; s < springs.length; s++) if (springs[s].on) active++;
-      sPoints.textContent = points.length;
-      sLinks.textContent = active;
+      sPoints.textContent = N;
+      sLinks.textContent = M;
       sFps.textContent = Math.round(frames * 1000 / (now - fpsT));
-      frames = 0; fpsT = now;
+      if (asleep) { sMs.textContent = 'idle'; sMs.title = 'Cloth has settled; the solver is paused until you touch it.'; }
+      else if (worked) {
+        sMs.textContent = ((simMs + drawMs) / worked).toFixed(2);
+        sMs.title = 'physics ' + (simMs / worked).toFixed(3) + ' ms + drawing ' + (drawMs / worked).toFixed(3) + ' ms per frame';
+      }
+      frames = 0; fpsT = now; simMs = drawMs = 0; worked = 0;
     }
     requestAnimationFrame(frame);
   }
