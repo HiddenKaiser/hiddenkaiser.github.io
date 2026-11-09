@@ -180,7 +180,7 @@ footer a:hover { color: var(--ink); }
       <article>
         <span class="n">02 · Constrain</span>
         <h2>Three kinds of spring</h2>
-        <p><b>Structural</b> springs join neighbours and stop stretching. <b>Shear</b> springs cross each cell diagonally so squares can't skew into diamonds. <b>Bend</b> springs skip a point, resisting sharp folds; they're what makes the cloth feel sturdy. Turn on <i>Shear &amp; bend</i> to see them. For self-collision, each point is tested against nearby triangles of the cloth itself; it remembers which side it started each step on and is pushed back out that side, so the fabric can rest on itself without clipping through.</p>
+        <p><b>Structural</b> springs join neighbours and stop stretching. <b>Shear</b> springs cross each cell diagonally so squares can't skew into diamonds. <b>Bend</b> springs skip a point, resisting sharp folds; they're what makes the cloth feel sturdy. Turn on <i>Shear &amp; bend</i> to see them. For self-collision, a spatial hash finds points that are close in space but far apart on the cloth and pushes them apart, and no point may move more than a set distance per step, so fast motion can't tunnel through.</p>
       </article>
       <article>
         <span class="n">03 · Shade</span>
@@ -216,13 +216,14 @@ footer a:hover { color: var(--ink); }
   var STEP = 1 / 120;            // fixed physics timestep
   var TEAR_RATIO = 3;            // a structural spring snaps beyond this multiple of its rest length
   var BEND_STIFFNESS = 0.2;      // fraction of the bend correction applied per pass
-  var SELF_THICK = 7;            // self-collision: how far a point must stay from the cloth surface (thickness)
-  var SELF_MARGIN = 10;          // extra distance at which a nearby triangle is already tracked (covers the step between gathers)
-  var SELF_FRICTION = 0.5;       // how strongly touching layers resist sliding over each other
-  var SELF_CELL = 24;            // spatial hash cell size for triangles
+  var SELF_DIST = 15;            // self-collision: closest two non-neighbouring points may get (cloth thickness)
+  var SELF_REACH = 22;           // radius candidate pairs are gathered within (thickness + margin for one step of motion)
+  var SELF_CELL = 2 * SELF_REACH; // hash cells twice the reach: each point then only checks 8 cells, not 27
   var HASH_SIZE = 4096;          // spatial hash buckets (power of two)
   var MAX_STEP = 12;             // no point moves further than this in one step, so nothing tunnels through
   var MAX_GRAB_SPEED = 1440;     // world units / s a held point can travel (= MAX_STEP per 1/120 s step)
+  var GRAB_RADIUS = 48;          // grabbing also pulls the cloth within this radius, fading out toward the edge
+  var GRAB_PULL = 0.5;           // pull strength at the centre of that patch (applied after every solver pass)
   var TOP = 70, FLOOR = 560;
 
   var N = COLS * ROWS;
@@ -244,20 +245,37 @@ footer a:hover { color: var(--ink); }
   var topology = 0;                              // bumps whenever the mesh changes
   var wind = false, tearing = false, grabbed = -1, simTime = 0;
   var target = { x: 0, y: 0, z: 0 };             // where the held point is being pulled
+  // the soft patch around the held point: which points, how strongly, and their offsets at grab time
+  var GI = new Int32Array(N), GW = new Float64Array(N), GOX = new Float64Array(N), GOY = new Float64Array(N), GOZ = new Float64Array(N), grabCount = 0;
+  // Pull the patch toward "held point + its offset at grab time", strongest near the centre. Applied after
+  // every solver pass so it holds against the springs: the grip is a hand-sized area, not a pinched point.
+  function pullGrabArea() {
+    if (grabbed < 0) return;
+    var g = grabbed;
+    for (var gk = 0; gk < grabCount; gk++) {
+      var j = GI[gk], w = GW[gk];
+      if (INV[j] === 0) continue;
+      X[j] += (X[g] + GOX[gk] - X[j]) * w; Y[j] += (Y[g] + GOY[gk] - Y[j]) * w; Z[j] += (Z[g] + GOZ[gk] - Z[j]) * w;
+    }
+  }
+  function grabArea(g) {
+    grabCount = 0;
+    for (var j = 0; j < N; j++) {
+      if (j === g || INV[j] === 0) continue;
+      var ox = X[j] - X[g], oy = Y[j] - Y[g], oz = Z[j] - Z[g], d = Math.sqrt(ox * ox + oy * oy + oz * oz);
+      if (d >= GRAB_RADIUS) continue;
+      var f = 1 - d / GRAB_RADIUS;
+      GI[grabCount] = j; GW[grabCount] = GRAB_PULL * f; GOX[grabCount] = ox; GOY[grabCount] = oy; GOZ[grabCount] = oz; grabCount++;
+    }
+  }
   var tears = [];
-  var selfCollide = true, stepCount = 0;
+  var selfCollide = true;
 
   // self-collision scratch space, allocated once
-  var NT_MAX = 2 * NC, NT = 0, NQ = 0, triTopology = -1;   // triangles 2q and 2q+1 make grid cell q
-  var TA = new Int32Array(NT_MAX), TB = new Int32Array(NT_MAX), TC = new Int32Array(NT_MAX);
   var ROWI = new Int16Array(N), COLI = new Int16Array(N);
   for (var gi = 0; gi < N; gi++) { ROWI[gi] = (gi / COLS) | 0; COLI[gi] = gi % COLS; }
-  var QN = new Int32Array(NC), QHASH = new Int32Array(NC * 64);   // hash buckets each grid cell landed in this step
-  var QBOX = new Float64Array(NC * 6), qStamp = new Int32Array(NC);
-  var cellStart = new Int32Array(HASH_SIZE + 1), cellItems = new Int32Array(NC * 64), stamp = 0;
-  var TNX = new Float64Array(NT_MAX), TNY = new Float64Array(NT_MAX), TNZ = new Float64Array(NT_MAX);
-  var TD00 = new Float64Array(NT_MAX), TD01 = new Float64Array(NT_MAX), TD11 = new Float64Array(NT_MAX), TIDEN = new Float64Array(NT_MAX);
-  var MAX_CONTACTS = N * 24, CQ = new Int32Array(MAX_CONTACTS), CT = new Int32Array(MAX_CONTACTS), CS = new Int8Array(MAX_CONTACTS), contactCount = 0;
+  var cellStart = new Int32Array(HASH_SIZE + 1), cellItems = new Int32Array(N), pointCell = new Int32Array(N);
+  var MAX_PAIRS = N * 16, PAIR_A = new Int32Array(MAX_PAIRS), PAIR_B = new Int32Array(MAX_PAIRS), pairCount = 0;
 
   function hEdge(r, c) { return r * (COLS - 1) + c; }
   function vEdge(r, c) { return HE + r * COLS + c; }
@@ -302,7 +320,7 @@ footer a:hover { color: var(--ink); }
       if (c < COLS - 2) addSpring(i, i + 2, KIND_BEND, hEdge(r, c), hEdge(r, c + 1));
       if (r < ROWS - 2) addSpring(i, i + 2 * COLS, KIND_BEND, vEdge(r, c), vEdge(r + 1, c));
     }
-    grabbed = -1; tears.length = 0; topology++;
+    grabbed = -1; grabCount = 0; tears.length = 0; topology++;
   }
 
   function removeSpring(s) {   // swap-remove keeps [0, M) dense
@@ -343,172 +361,53 @@ footer a:hover { color: var(--ink); }
     X[b] -= ox * wb; Y[b] -= oy * wb; Z[b] -= oz * wb;
   }
 
-  /* ---------- Self-collision: points against the cloth's own triangles ----------
-     Points collide with the actual surface (triangles), not just with other points, and each
-     contact remembers which side of the triangle the point started the step on (after Mueller et
-     al., "Position Based Dynamics", 2007). A point that ends a step on the wrong side, or closer
-     than the cloth's thickness, is pushed back out the side it came from. Candidates come from a
-     spatial hash of triangle bounds covering both where each triangle was and where it is now. */
+  /* ---------- Self-collision: points as small spheres, found with a spatial hash ---------- */
   function hashCell(ix, iy, iz) {
     return (Math.imul(ix, 92837111) ^ Math.imul(iy, 689287499) ^ Math.imul(iz, 283923481)) & (HASH_SIZE - 1);
   }
-  function buildTriangles() {
-    NT = 0;
-    for (var r = 0; r < ROWS - 1; r++) for (var c = 0; c < COLS - 1; c++) {
-      if (!EDGE[hEdge(r, c)] || !EDGE[hEdge(r + 1, c)] || !EDGE[vEdge(r, c)] || !EDGE[vEdge(r, c + 1)]) continue;
-      var i = r * COLS + c;
-      TA[NT] = i; TB[NT] = i + 1; TC[NT] = i + COLS + 1; NT++;
-      TA[NT] = i; TB[NT] = i + COLS + 1; TC[NT] = i + COLS; NT++;
-    }
-    NQ = NT >> 1;
-    triTopology = topology;
-  }
-
-  // Bin the cloth's grid cells (two triangles each) by their swept bounds, then find each point's candidate
-  // triangles along its own path. Per triangle, the unit normal and edge dot products are computed once
-  // per step, so each point-triangle test is a box check and a plane distance before any real work.
-  function prepTriangle(t) {
-    var a = TA[t], b = TB[t], c = TC[t], ax = X[a], ay = Y[a], az = Z[a];
-    var e1x = X[b] - ax, e1y = Y[b] - ay, e1z = Z[b] - az, e2x = X[c] - ax, e2y = Y[c] - ay, e2z = Z[c] - az;
-    var nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x, nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
-    var d00 = e1x * e1x + e1y * e1y + e1z * e1z, d01 = e1x * e2x + e1y * e2y + e1z * e2z, d11 = e2x * e2x + e2y * e2y + e2z * e2z;
-    var den = d00 * d11 - d01 * d01;
-    if (nl < 1e-9 || den < 1e-12) { TIDEN[t] = 0; return; }   // degenerate this step: never matches
-    TNX[t] = nx / nl; TNY[t] = ny / nl; TNZ[t] = nz / nl;
-    TD00[t] = d00; TD01[t] = d01; TD11[t] = d11; TIDEN[t] = 1 / den;
-  }
-  function gatherContacts() {
-    if (triTopology !== topology) buildTriangles();
-    var inv = 1 / SELF_CELL, pad = SELF_THICK + SELF_MARGIN, q, k, hh, cx, cy, cz, n, j;
+  // Bin every point into a hash grid (counting sort, no allocation), then collect the pairs that are
+  // close in space but not close on the cloth. Neighbours within two grid steps are skipped: they are
+  // already held apart by the springs, and colliding them would fight the bend springs.
+  function gatherPairs() {
+    var inv = 1 / SELF_CELL, i, k, hh, q2 = SELF_REACH * SELF_REACH;
     cellStart.fill(0);
-    for (q = 0; q < NQ; q++) {
-      prepTriangle(2 * q); prepTriangle(2 * q + 1);
-      // bounds of the cell's four corners, now and at the start of the step, padded
-      var i0 = TA[2 * q], mnx = X[i0], mxx = mnx, mny = Y[i0], mxy = mny, mnz = Z[i0], mxz = mnz;
-      for (n = 0; n < 4; n++) {
-        j = n === 0 ? i0 : n === 1 ? i0 + 1 : n === 2 ? i0 + COLS : i0 + COLS + 1;
-        var v1 = X[j], v2 = PX[j];
-        if (v1 < mnx) mnx = v1; if (v1 > mxx) mxx = v1; if (v2 < mnx) mnx = v2; if (v2 > mxx) mxx = v2;
-        v1 = Y[j]; v2 = PY[j];
-        if (v1 < mny) mny = v1; if (v1 > mxy) mxy = v1; if (v2 < mny) mny = v2; if (v2 > mxy) mxy = v2;
-        v1 = Z[j]; v2 = PZ[j];
-        if (v1 < mnz) mnz = v1; if (v1 > mxz) mxz = v1; if (v2 < mnz) mnz = v2; if (v2 > mxz) mxz = v2;
-      }
-      mnx -= pad; mxx += pad; mny -= pad; mxy += pad; mnz -= pad; mxz += pad;
-      var o = q * 6;
-      QBOX[o] = mnx; QBOX[o + 1] = mxx; QBOX[o + 2] = mny; QBOX[o + 3] = mxy; QBOX[o + 4] = mnz; QBOX[o + 5] = mxz;
-      var x0 = Math.floor(mnx * inv), x1 = Math.floor(mxx * inv), y0 = Math.floor(mny * inv), y1 = Math.floor(mxy * inv), z0 = Math.floor(mnz * inv), z1 = Math.floor(mxz * inv);
-      if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 64) { QN[q] = 0; continue; }   // absurdly stretched: skip
-      var m = 0, base = q * 64;   // remember each bucket so the fill pass does not hash again
-      for (cx = x0; cx <= x1; cx++) for (cy = y0; cy <= y1; cy++) for (cz = z0; cz <= z1; cz++) { hh = hashCell(cx, cy, cz); cellStart[hh]++; QHASH[base + m++] = hh; }
-      QN[q] = m;
+    for (i = 0; i < N; i++) {
+      hh = hashCell(Math.floor(X[i] * inv), Math.floor(Y[i] * inv), Math.floor(Z[i] * inv));
+      pointCell[i] = hh; cellStart[hh]++;
     }
     for (hh = 1; hh <= HASH_SIZE; hh++) cellStart[hh] += cellStart[hh - 1];
-    for (q = 0; q < NQ; q++) for (n = 0, j = q * 64; n < QN[q]; n++) cellItems[--cellStart[QHASH[j + n]]] = q;
-    contactCount = 0;
-    if (stamp > 1e9) { qStamp.fill(0); stamp = 0; }
-    var reach = pad + MAX_STEP;   // a point further than this from a triangle's plane cannot have crossed it this step
-    for (var i = 0; i < N; i++) {
-      var px = X[i], py = Y[i], pz = Z[i], ox = PX[i], oy = PY[i], oz = PZ[i];
-      var qx0 = Math.floor((px < ox ? px : ox) * inv), qx1 = Math.floor((px > ox ? px : ox) * inv);
-      var qy0 = Math.floor((py < oy ? py : oy) * inv), qy1 = Math.floor((py > oy ? py : oy) * inv);
-      var qz0 = Math.floor((pz < oz ? pz : oz) * inv), qz1 = Math.floor((pz > oz ? pz : oz) * inv);
-      stamp++;
-      for (cx = qx0; cx <= qx1; cx++) for (cy = qy0; cy <= qy1; cy++) for (cz = qz0; cz <= qz1; cz++) {
-        hh = hashCell(cx, cy, cz);
+    for (i = 0; i < N; i++) cellItems[--cellStart[pointCell[i]]] = i;
+    pairCount = 0;
+    for (i = 0; i < N; i++) {
+      var fx = X[i] * inv, fy = Y[i] * inv, fz = Z[i] * inv, ix = Math.floor(fx), iy = Math.floor(fy), iz = Math.floor(fz);
+      // anything within SELF_REACH lies in this cell or the neighbour on the nearer side, per axis
+      var sx = fx - ix < 0.5 ? -1 : 1, sy = fy - iy < 0.5 ? -1 : 1, sz = fz - iz < 0.5 ? -1 : 1, ri = ROWI[i], ci = COLI[i];
+      for (var ox = 0; ox < 2; ox++) for (var oy = 0; oy < 2; oy++) for (var oz = 0; oz < 2; oz++) {
+        hh = hashCell(ix + ox * sx, iy + oy * sy, iz + oz * sz);
         for (k = cellStart[hh]; k < cellStart[hh + 1]; k++) {
-          q = cellItems[k];
-          if (qStamp[q] === stamp) continue;            // already tested via another hash cell
-          qStamp[q] = stamp;
-          var b6 = q * 6;
-          if (px < QBOX[b6] || px > QBOX[b6 + 1] || py < QBOX[b6 + 2] || py > QBOX[b6 + 3] || pz < QBOX[b6 + 4] || pz > QBOX[b6 + 5]) continue;
-          testTriangle(i, 2 * q, px, py, pz, reach, pad);
-          testTriangle(i, 2 * q + 1, px, py, pz, reach, pad);
+          var j = cellItems[k];
+          if (j <= i) continue;
+          var dr = ROWI[j] - ri, dc = COLI[j] - ci;
+          if (dr <= 2 && dr >= -2 && dc <= 2 && dc >= -2) continue;
+          var ex = X[j] - X[i], ey = Y[j] - Y[i], ez = Z[j] - Z[i];
+          if (ex * ex + ey * ey + ez * ez < q2 && pairCount < MAX_PAIRS) { PAIR_A[pairCount] = i; PAIR_B[pairCount] = j; pairCount++; }
         }
       }
     }
   }
-  function testTriangle(i, t, px, py, pz, reach, pad) {
-    var a = TA[t], b = TB[t], c = TC[t];
-    if (TIDEN[t] === 0) return;
-    // Skip triangles touching the point or its direct grid neighbours: folding back over a neighbour is the
-    // bend springs' job, and colliding there makes contacts fight the point's own springs (jitter).
-    var ri = ROWI[i], ci = COLI[i], dr, dc;
-    dr = ROWI[a] - ri; dc = COLI[a] - ci; if (dr <= 1 && dr >= -1 && dc <= 1 && dc >= -1) return;
-    dr = ROWI[b] - ri; dc = COLI[b] - ci; if (dr <= 1 && dr >= -1 && dc <= 1 && dc >= -1) return;
-    dr = ROWI[c] - ri; dc = COLI[c] - ci; if (dr <= 1 && dr >= -1 && dc <= 1 && dc >= -1) return;
-    var qx = px - X[a], qy = py - Y[a], qz = pz - Z[a];
-    var d = qx * TNX[t] + qy * TNY[t] + qz * TNZ[t];
-    if (d > reach || d < -reach) return;
-    var f1x = X[b] - X[a], f1y = Y[b] - Y[a], f1z = Z[b] - Z[a], f2x = X[c] - X[a], f2y = Y[c] - Y[a], f2z = Z[c] - Z[a];
-    var d20 = qx * f1x + qy * f1y + qz * f1z, d21 = qx * f2x + qy * f2y + qz * f2z;
-    var v = (TD11[t] * d20 - TD01[t] * d21) * TIDEN[t], w = (TD00[t] * d21 - TD01[t] * d20) * TIDEN[t];
-    if (v < -0.3 || w < -0.3 || v + w > 1.3) return;     // generous: it may slide over this triangle before the next gather
-    // Which side did the point start this step on? Only trust it if it was over the triangle then too;
-    // otherwise it may have come around a free edge, so use the side it is on now.
-    project(i, a, b, c, PX, PY, PZ);
-    var side = (inside(0.25) && Math.abs(G[0]) > 0.01) ? (G[0] > 0 ? 1 : -1) : (d >= 0 ? 1 : -1);
-    if (side * d >= pad) return;                     // comfortably clear on the correct side
-    if (contactCount < MAX_CONTACTS) { CQ[contactCount] = i; CT[contactCount] = t; CS[contactCount] = side; contactCount++; }
-  }
-
-  // Signed distance of point i from triangle (a, b, c) and its barycentric coordinates, from the given
-  // position arrays (used for the start-of-step side). Results land in the scratch array G.
-  var G = new Float64Array(5);   // [distance, u, v, w, ok]
-  function project(i, a, b, c, Xa, Ya, Za) {
-    var ax = Xa[a], ay = Ya[a], az = Za[a];
-    var e1x = Xa[b] - ax, e1y = Ya[b] - ay, e1z = Za[b] - az, e2x = Xa[c] - ax, e2y = Ya[c] - ay, e2z = Za[c] - az;
-    var nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x, nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
-    if (nl < 1e-9) { G[4] = 0; return; }
-    var qx = Xa[i] - ax, qy = Ya[i] - ay, qz = Za[i] - az;
-    var d00 = e1x * e1x + e1y * e1y + e1z * e1z, d01 = e1x * e2x + e1y * e2y + e1z * e2z, d11 = e2x * e2x + e2y * e2y + e2z * e2z;
-    var d20 = qx * e1x + qy * e1y + qz * e1z, d21 = qx * e2x + qy * e2y + qz * e2z, den = d00 * d11 - d01 * d01;
-    var v = (d11 * d20 - d01 * d21) / den, w = (d00 * d21 - d01 * d20) / den;
-    G[0] = (qx * nx + qy * ny + qz * nz) / nl; G[1] = 1 - v - w; G[2] = v; G[3] = w; G[4] = 1;
-  }
-  function inside(slack) { return G[4] === 1 && G[1] >= -slack && G[2] >= -slack && G[3] >= -slack; }
-
-  // Push each contact back out to the cloth's thickness on its remembered side, moving the point and
-  // the triangle's corners by inverse mass. With friction on, also cancel some of the sliding between
-  // them this step (applied to positions, so resting layers come fully to rest).
-  function resolveContacts(friction) {
-    for (var p = 0; p < contactCount; p++) {
-      var i = CQ[p], t = CT[p], side = CS[p], a = TA[t], b = TB[t], c = TC[t];
-      var ax = X[a], ay = Y[a], az = Z[a];
-      var e1x = X[b] - ax, e1y = Y[b] - ay, e1z = Z[b] - az, e2x = X[c] - ax, e2y = Y[c] - ay, e2z = Z[c] - az;
-      var nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x, nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
-      if (nl < 1e-9) continue;
-      nx /= nl; ny /= nl; nz /= nl;
-      var qx = X[i] - ax, qy = Y[i] - ay, qz = Z[i] - az;
-      var d00 = e1x * e1x + e1y * e1y + e1z * e1z, d01 = e1x * e2x + e1y * e2y + e1z * e2z, d11 = e2x * e2x + e2y * e2y + e2z * e2z;
-      var d20 = qx * e1x + qy * e1y + qz * e1z, d21 = qx * e2x + qy * e2y + qz * e2z, den = d00 * d11 - d01 * d01;
-      var v = (d11 * d20 - d01 * d21) / den, w = (d00 * d21 - d01 * d20) / den, u = 1 - v - w;
-      if (u < -0.1 || v < -0.1 || w < -0.1) continue;   // slid off this triangle; a neighbour picks it up
-      var C = side * (qx * nx + qy * ny + qz * nz) - SELF_THICK;
-      if (C >= 0) continue;
-      var wq = INV[i], wa = INV[a], wb = INV[b], wc = INV[c];
-      var denom = wq + wa * u * u + wb * v * v + wc * w * w;
-      if (denom === 0) continue;
-      var lam = -C / denom, sx = side * nx * lam, sy = side * ny * lam, sz = side * nz * lam;
-      X[i] += sx * wq; Y[i] += sy * wq; Z[i] += sz * wq;
-      X[a] -= sx * wa * u; Y[a] -= sy * wa * u; Z[a] -= sz * wa * u;
-      X[b] -= sx * wb * v; Y[b] -= sy * wb * v; Z[b] -= sz * wb * v;
-      X[c] -= sx * wc * w; Y[c] -= sy * wc * w; Z[c] -= sz * wc * w;
-      if (!friction) continue;
-      // tangential slide of the point relative to the surface under it, since the step began
-      var rx = (X[i] - PX[i]) - (u * (X[a] - PX[a]) + v * (X[b] - PX[b]) + w * (X[c] - PX[c]));
-      var ry = (Y[i] - PY[i]) - (u * (Y[a] - PY[a]) + v * (Y[b] - PY[b]) + w * (Y[c] - PY[c]));
-      var rz = (Z[i] - PZ[i]) - (u * (Z[a] - PZ[a]) + v * (Z[b] - PZ[b]) + w * (Z[c] - PZ[c]));
-      var rn = rx * nx + ry * ny + rz * nz;
-      rx -= rn * nx; ry -= rn * ny; rz -= rn * nz;
-      var rl = Math.sqrt(rx * rx + ry * ry + rz * rz);
-      if (rl < 1e-9) continue;
-      var f = Math.min(1, SELF_FRICTION * -C / rl) / denom;   // Coulomb-style: bounded by the push
-      rx *= f; ry *= f; rz *= f;
-      X[i] -= rx * wq; Y[i] -= ry * wq; Z[i] -= rz * wq;
-      X[a] += rx * wa * u; Y[a] += ry * wa * u; Z[a] += rz * wa * u;
-      X[b] += rx * wb * v; Y[b] += ry * wb * v; Z[b] += rz * wb * v;
-      X[c] += rx * wc * w; Y[c] += ry * wc * w; Z[c] += rz * wc * w;
+  // Push overlapping pairs apart to SELF_DIST, split by inverse mass. (No friction term: editing the
+  // previous positions for friction kept resting layers creeping forever, so the solver never slept.)
+  function resolvePairs() {
+    var m2 = SELF_DIST * SELF_DIST;
+    for (var p = 0; p < pairCount; p++) {
+      var a = PAIR_A[p], b = PAIR_B[p];
+      var dx = X[b] - X[a], dy = Y[b] - Y[a], dz = Z[b] - Z[a], d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 >= m2 || d2 < 1e-8) continue;
+      var wa = INV[a], wb = INV[b], w = wa + wb;
+      if (w === 0) continue;
+      var d = Math.sqrt(d2), k = (SELF_DIST - d) / (d * w);
+      X[a] -= dx * k * wa; Y[a] -= dy * k * wa; Z[a] -= dz * k * wa;
+      X[b] += dx * k * wb; Y[b] += dy * k * wb; Z[b] += dz * k * wb;
     }
   }
 
@@ -540,11 +439,11 @@ footer a:hover { color: var(--ink); }
       PX[g] = X[g]; PY[g] = Y[g]; PZ[g] = Z[g];
       if (gd2 > maxMove * maxMove) { var f = maxMove / Math.sqrt(gd2); gx *= f; gyy *= f; gz *= f; }
       X[g] += gx; Y[g] += gyy; Z[g] += gz;
+      pullGrabArea();
     }
 
-    // 3. Self-collision: find the triangles near each point's path. Gathering every other step halves the
-    //    cost; the wider margin keeps the step in between covered, and contacts are resolved every step.
-    if (selfCollide && (stepCount++ & 1) === 0) gatherContacts();
+    // 3. Self-collision: gather nearby pairs every step, then resolve them between constraint passes
+    if (selfCollide) gatherPairs();
 
     // 4. Constraints. The first pass also finds over-stretched structural springs to tear;
     //    later passes alternate direction (symmetric Gauss-Seidel converges faster).
@@ -557,13 +456,14 @@ footer a:hover { color: var(--ink); }
       relax(s);
     }
     if (tears.length) { for (i = 0; i < tears.length; i++) breakEdge(tears[i]); tears.length = 0; }
-    if (selfCollide) resolveContacts(false);
+    if (selfCollide) resolvePairs();
     for (it = 1; it < ITERATIONS; it++) {
       if (it & 1) { for (s = M - 1; s >= 0; s--) relax(s); }
       else { for (s = 0; s < M; s++) relax(s); }
-      if (selfCollide && it === (ITERATIONS >> 1)) resolveContacts(false);
+      if (selfCollide && it === (ITERATIONS >> 1)) resolvePairs();
+      if (grabCount) pullGrabArea();
     }
-    if (selfCollide) resolveContacts(true);
+    if (selfCollide) resolvePairs();
 
     // 5. Floor with friction, soft walls, and motion for the sleep check
     var maxMotion = 0;
@@ -937,8 +837,12 @@ footer a:hover { color: var(--ink); }
     var focus = grabbed >= 0 ? grabbed : (mode === 'grab' && pointer.inside && !pointer.down ? hover : -1);
     if (focus >= 0) {
       var p = projectPoint(RX[focus], RY[focus], RZ[focus]);
+      // the grab patch: a soft disc the size of GRAB_RADIUS on screen, plus a ring on the held point
+      var e = projectPoint(RX[focus] + GRAB_RADIUS, RY[focus], RZ[focus]), pr = Math.hypot(e[0] - p[0], e[1] - p[1]);
+      octx.fillStyle = grabbed >= 0 ? 'rgba(255,77,18,0.16)' : 'rgba(255,77,18,0.09)';
+      octx.beginPath(); octx.arc(p[0], p[1], pr, 0, 6.2832); octx.fill();
       octx.strokeStyle = '#FF4D12'; octx.lineWidth = 2;
-      octx.beginPath(); octx.arc(p[0], p[1], grabbed >= 0 ? 9 : 7, 0, 6.2832); octx.stroke();
+      octx.beginPath(); octx.arc(p[0], p[1], grabbed >= 0 ? 7 : 5, 0, 6.2832); octx.stroke();
     }
     if (pointer.cutting && pointer.inside) {
       octx.fillStyle = 'rgba(255,77,18,0.18)';
@@ -1005,6 +909,7 @@ footer a:hover { color: var(--ink); }
       grabbed = nearestPoint(p[0], p[1]);
       if (grabbed >= 0) {
         INV[grabbed] = 0;
+        grabArea(grabbed);
         target.x = pointer.wx = X[grabbed]; target.y = pointer.wy = Y[grabbed]; target.z = pointer.wz = Z[grabbed];
       } else pointer.orbiting = true;              // empty space: orbit the camera
     }
@@ -1048,7 +953,7 @@ footer a:hover { color: var(--ink); }
         INV[g] = 1;
       }
     }
-    grabbed = -1; pointer.down = false; pointer.cutting = false; pointer.orbiting = false;
+    grabbed = -1; grabCount = 0; pointer.down = false; pointer.cutting = false; pointer.orbiting = false;
     wake(); updateCursor();
   }
   canvas.addEventListener('pointerup', release);
@@ -1115,8 +1020,10 @@ footer a:hover { color: var(--ink); }
       var t0 = performance.now(), n = 0, motion = 0;
       if (!asleep) {
         acc += dt;
-        while (acc >= STEP && n < 8) { motion = Math.max(motion, step(STEP)); acc -= STEP; n++; }
-        if (n === 8) acc = 0;
+        // catch up at most 4 steps or ~8 ms per frame; if still behind, drop the leftover time (brief slow
+        // motion) instead of letting heavy frames demand ever more steps and freeze the page
+        while (acc >= STEP && n < 4 && performance.now() - t0 < 8) { motion = Math.max(motion, step(STEP)); acc -= STEP; n++; }
+        if (acc >= STEP) acc = 0;
         // idle the solver once the cloth has settled and nobody is touching it
         if (n > 0) {
           if (!wind && grabbed < 0 && !pointer.down && motion < SLEEP_MOTION) { if (++still > SLEEP_FRAMES) asleep = true; }
