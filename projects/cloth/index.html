@@ -141,7 +141,7 @@ footer a:hover { color: var(--ink); }
             <button type="button" id="modeCut" aria-pressed="false">Cut</button>
           </div>
           <button type="button" class="toggle" id="wind" aria-pressed="false"><span class="sw" aria-hidden="true"></span>Wind</button>
-          <button type="button" class="toggle" id="tear" aria-pressed="true"><span class="sw" aria-hidden="true"></span>Tearing</button>
+          <button type="button" class="toggle" id="tear" aria-pressed="false"><span class="sw" aria-hidden="true"></span>Tearing</button>
           <button type="button" class="toggle" id="surface" aria-pressed="true"><span class="sw" aria-hidden="true"></span>Shaded</button>
           <button type="button" class="toggle" id="springs" aria-pressed="true"><span class="sw" aria-hidden="true"></span>Springs</button>
           <button type="button" class="toggle" id="hidden" aria-pressed="false"><span class="sw" aria-hidden="true"></span>Shear &amp; bend</button>
@@ -150,7 +150,7 @@ footer a:hover { color: var(--ink); }
         <div class="stats" aria-live="off">
           <span><b id="sPoints">0</b> points</span>
           <span><b id="sLinks">0</b> springs</span>
-          <span><b id="sFps">0</b> fps</span>
+          <span title="The frame rate this device could reach if the screen refresh did not cap it: 1000 ÷ ms per frame. Counts CPU time; GPU work runs in parallel and is not included."><b id="sFps">0</b> max fps</span>
           <span title="CPU time per frame"><b id="sMs">0</b> ms/frame</span>
         </div>
       </div>
@@ -182,7 +182,7 @@ footer a:hover { color: var(--ink); }
       <article>
         <span class="n">03 · Shade</span>
         <h2>Lighting the surface</h2>
-        <p>Every frame, each point's normal is the cross product of the vectors to its neighbours. A WebGL shader lights the fabric from that normal, with a soft wrap-around key light, a fill light and a sheen at grazing angles. The front and back are coloured differently so you can see the cloth turn over.</p>
+        <p>Every frame, each point's normal is the cross product of the vectors to its neighbours. A WebGL shader lights the fabric from that normal, with a soft wrap-around key light, a fill light and a sheen at grazing angles. The front is white and the back slate so you can see it turn over, and both blend toward orange wherever the springs are stretched, on the same scale as the lines.</p>
       </article>
     </section>
 
@@ -233,7 +233,7 @@ footer a:hover { color: var(--ink); }
   var EDGE = new Uint8Array(NE);                 // 1 while a structural edge is intact
   var M = 0;                                     // live springs, dense in [0, M)
   var topology = 0;                              // bumps whenever the mesh changes
-  var wind = false, tearing = true, grabbed = -1, simTime = 0;
+  var wind = false, tearing = false, grabbed = -1, simTime = 0;
   var target = { x: 0, y: 0, z: 0 };             // where the held point is being pulled
   var tears = [];
 
@@ -500,25 +500,25 @@ footer a:hover { color: var(--ink); }
   // Fabric: two-sided lighting from per-vertex normals, wrap-around diffuse, fill light,
   // grazing-angle sheen and a faint woven texture. Also draws the flattened floor shadow.
   var surfaceProg = program([
-    'attribute vec3 aPos; attribute vec3 aNor; attribute vec2 aUv;',
+    'attribute vec3 aPos; attribute vec3 aNor; attribute vec2 aUv; attribute float aStress; varying float vStress;',
     'uniform mat4 uVP; uniform float uFlatten; uniform float uFloor;',
     'varying vec3 vNor; varying vec2 vUv; varying vec3 vPos;',
     'void main() {',
     '  vec3 p = aPos;',
     '  if (uFlatten > 0.5) p.y = uFloor;',
-    '  vPos = p; vNor = aNor; vUv = aUv;',
+    '  vPos = p; vNor = aNor; vUv = aUv; vStress = aStress;',
     '  gl_Position = uVP * vec4(p, 1.0);',
     '}'].join('\n'), [
     'precision mediump float;',
     'varying vec3 vNor; varying vec2 vUv; varying vec3 vPos;',
     'uniform vec3 uEye; uniform vec3 uKey; uniform vec3 uFill; uniform float uShadow;',
-    'uniform vec3 uFront; uniform vec3 uBack; uniform vec2 uGrid;',
+    'uniform vec3 uFront; uniform vec3 uBack; uniform vec2 uGrid; uniform vec3 uHot; varying float vStress;',
     'void main() {',
     '  if (uShadow > 0.5) { gl_FragColor = vec4(0.05, 0.06, 0.08, 0.11); return; }',
     '  vec3 n = normalize(vNor);',
     '  vec3 v = normalize(uEye - vPos);',
     '  float facing = dot(n, v);',
-    '  vec3 base = facing >= 0.0 ? uFront : uBack;',
+    '  vec3 base = mix(facing >= 0.0 ? uFront : uBack, uHot, smoothstep(1.1, 2.4, vStress));',   // same strain scale as the springs
     '  if (facing < 0.0) n = -n;',                                  // light whichever side we see
     '  float key = clamp((dot(n, uKey) + 0.35) / 1.35, 0.0, 1.0);',   // wrap lighting: soft like fabric
     '  float fill = max(dot(n, uFill), 0.0);',
@@ -558,9 +558,10 @@ footer a:hover { color: var(--ink); }
   var lineData = [new Float32Array(MAX_SPRINGS * 8), new Float32Array(MAX_SPRINGS * 8), new Float32Array(MAX_SPRINGS * 8)];
   var lineCount = [0, 0, 0];
   var pinData = new Float32Array(N * 4), pinCount = 0;
+  var stressData = new Float32Array(N);
 
   var bufPos = gl.createBuffer(), bufNor = gl.createBuffer(), bufUv = gl.createBuffer(), bufIdx = gl.createBuffer();
-  var bufLines = [gl.createBuffer(), gl.createBuffer(), gl.createBuffer()], bufPins = gl.createBuffer(), bufFloor = gl.createBuffer();
+  var bufLines = [gl.createBuffer(), gl.createBuffer(), gl.createBuffer()], bufPins = gl.createBuffer(), bufFloor = gl.createBuffer(), bufStress = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, bufUv); gl.bufferData(gl.ARRAY_BUFFER, uvData, gl.STATIC_DRAW);
 
   var floorVerts = [], fx, fz;
@@ -635,6 +636,16 @@ footer a:hover { color: var(--ink); }
         var nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
         norData[i * 3] = nx / nl; norData[i * 3 + 1] = ny / nl; norData[i * 3 + 2] = nz / nl;
       }
+      // per-vertex stress: the most-stretched structural spring touching each point, as length^2 / rest^2
+      stressData.fill(1);
+      for (s = 0; s < M; s++) {
+        if (KIND[s] !== KIND_STRUCT) continue;
+        var sa = SA[s], sb = SB[s], ex = RX[sb] - RX[sa], ey = RY[sb] - RY[sa], ez = RZ[sb] - RZ[sa];
+        var st = (ex * ex + ey * ey + ez * ez) / RR[s];
+        if (st > stressData[sa]) stressData[sa] = st;
+        if (st > stressData[sb]) stressData[sb] = st;
+      }
+      gl.bindBuffer(gl.ARRAY_BUFFER, bufStress); gl.bufferData(gl.ARRAY_BUFFER, stressData, gl.DYNAMIC_DRAW);
       gl.bindBuffer(gl.ARRAY_BUFFER, bufPos); gl.bufferData(gl.ARRAY_BUFFER, posData, gl.DYNAMIC_DRAW);
       gl.bindBuffer(gl.ARRAY_BUFFER, bufNor); gl.bufferData(gl.ARRAY_BUFFER, norData, gl.DYNAMIC_DRAW);
 
@@ -644,10 +655,11 @@ footer a:hover { color: var(--ink); }
       gl.uniform3f(surfaceProg.u.uKey, -0.36, -0.55, -0.75);      // up-left and in front of the cloth (y is down)
       gl.uniform3f(surfaceProg.u.uFill, 0.6, -0.2, 0.77);         // from behind-right
       gl.uniform3f(surfaceProg.u.uFront, 0.93, 0.935, 0.95);      // paper white
-      gl.uniform3f(surfaceProg.u.uBack, 1.0, 0.36, 0.13);          // the site's orange
+      gl.uniform3f(surfaceProg.u.uBack, 0.55, 0.58, 0.64);         // slate, so stress orange reads on both sides
+      gl.uniform3f(surfaceProg.u.uHot, 1.0, 0.30, 0.07);           // the springs' strained colour
       gl.uniform2f(surfaceProg.u.uGrid, COLS - 1, ROWS - 1);
       gl.uniform1f(surfaceProg.u.uFloor, FLOOR - 0.5);
-      attrib(surfaceProg, 'aPos', bufPos, 3); attrib(surfaceProg, 'aNor', bufNor, 3); attrib(surfaceProg, 'aUv', bufUv, 2);
+      attrib(surfaceProg, 'aPos', bufPos, 3); attrib(surfaceProg, 'aNor', bufNor, 3); attrib(surfaceProg, 'aUv', bufUv, 2); attrib(surfaceProg, 'aStress', bufStress, 1);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufIdx);
 
       // soft shadow: the mesh flattened onto the floor, each pixel darkened once (stencil)
@@ -920,10 +932,12 @@ footer a:hover { color: var(--ink); }
     if (now - fpsT > 500) {
       sPoints.textContent = N;
       sLinks.textContent = M;
-      sFps.textContent = Math.round(frames * 1000 / (now - fpsT));
-      if (asleep) { sMs.textContent = 'idle'; sMs.title = 'Cloth has settled; the solver is paused until you touch it.'; }
+      if (asleep) { sFps.textContent = '—'; sMs.textContent = 'idle'; sMs.title = 'Cloth has settled; the solver is paused until you touch it.'; }
       else if (worked) {
-        sMs.textContent = ((simMs + drawMs) / worked).toFixed(2);
+        var msPerFrame = (simMs + drawMs) / worked;
+        sMs.textContent = msPerFrame.toFixed(2);
+        // theoretical frame rate if only our own CPU work limited it (display refresh normally caps it)
+        sFps.textContent = Math.round(1000 / Math.max(msPerFrame, 0.01)).toLocaleString("en-US");
         sMs.title = 'physics ' + (simMs / worked).toFixed(3) + ' ms + drawing ' + (drawMs / worked).toFixed(3) + ' ms per frame';
       }
       frames = 0; fpsT = now; simMs = drawMs = 0; worked = 0;
