@@ -69,6 +69,11 @@ a { color: inherit; }
 .card p.desc { font-size: 15px; color: var(--muted); }
 .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 4px; }
 .tag { font-family: var(--mono); font-size: 11.5px; padding: 4px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); background: var(--paper); }
+.portal { position: relative; display: block; height: 170px; margin: -4px -4px 4px; border-radius: 10px; background: #000; overflow: hidden; }
+.portal canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.portal .live-pill { position: absolute; left: 10px; top: 10px; display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 11.5px; color: #fff; background: rgba(0,0,0,.7); border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent); padding: 3px 9px 3px 7px; border-radius: 999px; text-decoration: none; }
+.portal .live-pill i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.portal:hover .live-pill { border-color: var(--accent); }
 .foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 13.5px; }
 .foot a { font-weight: 500; text-decoration: none; display: inline-flex; gap: 6px; align-items: center; }
 .foot a:hover { color: var(--accent-deep); }
@@ -158,6 +163,7 @@ footer a:hover { color: var(--ink); }
       </article>
 
       <article class="card">
+        <a class="portal" href="/projects/glass/" aria-label="Open the interactive glass breaking demo"><canvas data-glass-preview aria-hidden="true"></canvas><span class="live-pill"><i aria-hidden="true"></i>Interactive demo</span></a>
         <div class="meta"><span>2025</span><span>Luau</span></div>
         <h2>Procedural glass shatter</h2>
         <p class="desc">Breaks any polygonal pane into shards around the impact point using concentric fracture rings and radial cracks, then triangulates each shard with ear clipping into its own EditableMesh. The web demo adds a bond network that decides which shards fall.</p>
@@ -201,5 +207,6 @@ footer a:hover { color: var(--ink); }
 </footer>
 
 <script src="../cloth-preview.js" defer></script>
+<script src="../glass-preview.js" defer></script>
 </body>
 </html>

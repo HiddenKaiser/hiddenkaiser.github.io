@@ -302,10 +302,11 @@ section.block { padding: clamp(64px, 10vw, 128px) 0 0; }
 @media (max-width: 620px) { .case .pj-list li { grid-template-columns: 1fr; } }
 .case-projects .pj-cta { margin-top: auto; display: inline-flex; align-items: center; gap: 10px; width: max-content; padding: 11px 18px; border-radius: 999px; background: var(--ink); color: var(--paper); font-weight: 500; font-size: 15px; transition: background .25s, transform .25s var(--ease); }
 .case-projects:hover .pj-cta { background: var(--accent-deep); transform: translateX(3px); }
-.pj-art { position: relative; min-height: 220px; border-radius: 12px; background: var(--ink); overflow: hidden; }
-.pj-art canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.pj-art { display: grid; grid-template-rows: 1fr 1fr; gap: 12px; min-height: 340px; }
+.pj-portal { position: relative; min-height: 150px; border-radius: 12px; background: var(--ink); overflow: hidden; }
+.pj-portal canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .pj-art .label { position: absolute; left: 10px; bottom: 10px; font-family: var(--mono); font-size: 11.5px; color: #9AA1AE; background: var(--ink); padding: 3px 6px; border-radius: 6px; }
-@media (max-width: 880px) { .case-projects { grid-template-columns: 1fr; } .pj-art { min-height: 200px; } }
+@media (max-width: 880px) { .case-projects { grid-template-columns: 1fr; } .pj-art { min-height: 320px; } }
 
 /* Approach */
 .steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; position: relative; counter-reset: step; }
@@ -758,8 +759,14 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
           </span>
         </div>
         <div class="pj-art" aria-hidden="true">
-          <canvas data-cloth-preview data-center></canvas>
-          <span class="label">cloth-sim · 228 points · 5 pins</span>
+          <div class="pj-portal">
+            <canvas data-cloth-preview data-center></canvas>
+            <span class="label">cloth-sim · 228 points · 5 pins</span>
+          </div>
+          <div class="pj-portal">
+            <canvas data-glass-preview></canvas>
+            <span class="label">glass · shattered pane</span>
+          </div>
         </div>
       </a>
     </div>
@@ -1095,5 +1102,6 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
 })();
 </script>
 <script src="cloth-preview.js" defer></script>
+<script src="glass-preview.js" defer></script>
 </body>
 </html>

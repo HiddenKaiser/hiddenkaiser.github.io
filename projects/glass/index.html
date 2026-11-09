@@ -199,6 +199,7 @@ footer a:hover { color: var(--ink); }
   var GRAVITY = 1800;
   var EDGE_EPS = 0.6;                                    // tolerance for "these two edges coincide"
   var ATTACHED = 0, FALLING = 1, RESTING = 2, GONE = 3;
+  var CRACK_TIME = 0.06;                                 // seconds for new cracks to spread out from the impact
 
   var canvas = document.getElementById('glass'), ctx = canvas.getContext('2d');
   var layer = document.createElement('canvas'), lctx = layer.getContext('2d');  // cached static glass
@@ -207,6 +208,7 @@ footer a:hover { color: var(--ink); }
   var bonds = [];
   var nextId = 0, time = 0, power = 1, showBonds = false;
   var staticDirty = true, supportDirty = false, listsDirty = true, bfsStamp = 0;
+  var waves = [];                                        // cracks still spreading: { ox, oy, t0, maxR, parent, done }
 
   function rand(a, b) { return a + Math.random() * (b - a); }
 
@@ -424,10 +426,13 @@ footer a:hover { color: var(--ink); }
       if (o) { if (o.state === ATTACHED && neighbours.indexOf(o) < 0) neighbours.push(o); } else frameBonded = true;
     }
     s.state = GONE;
+    var wave = { ox: ox, oy: oy, t0: time, maxR: maxR, parent: P, done: false };
+    waves.push(wave);
     var made = [];
     for (i = 0; i < final.length; i++) {
       var ns = makeShard(final[i], ox, oy);
       ns.gen = s.gen;
+      ns.wave = wave; ns.minFall = time + CRACK_TIME;   // nothing falls before the crack has reached it
       // fine hairline cracks near the impact that do not split the shard
       if (Math.hypot(ns.cx - ox, ns.cy - oy) < ringLimit * 0.7 && Math.random() < 0.45 && ns.area > 8) {
         var q = ns.pts, va = (Math.random() * (q.length / 2) | 0) * 2, t1 = rand(0.15, 0.6), t2 = rand(0.15, 0.6);
@@ -461,7 +466,7 @@ footer a:hover { color: var(--ink); }
 
   /* ---------- Support: which shards are still held? ---------- */
   function schedule(s, delay) {
-    var at = time + delay;
+    var at = Math.max(time + delay, s.minFall || 0);
     if (s.fallAt < 0 || at < s.fallAt) s.fallAt = at;
   }
   // Breadth-first search from the frame through intact bonds. Shards it can't reach fall; shards it can
@@ -612,6 +617,7 @@ footer a:hover { color: var(--ink); }
     shards = keep; listsDirty = false;
   }
 
+  function spreading(s) { return s.wave && !s.wave.done; }
   function drawStatic() {
     var c = lctx, i, s, k = 1 / scale;
     c.setTransform(1, 0, 0, 1, 0, 0);
@@ -642,10 +648,12 @@ footer a:hover { color: var(--ink); }
     c.strokeStyle = 'rgba(255,255,255,0.35)'; c.lineWidth = k;
     c.strokeRect(PANE.x0 - 2, PANE.y0 - 2, PANE.x1 - PANE.x0 + 4, PANE.y1 - PANE.y0 + 4);
 
-    // glass still in the frame: one path for all of it
+    // glass still in the frame: one path for all of it. Shards whose cracks are still spreading are filled as
+    // their intact parent instead, and their outlines are revealed inside a circle growing from the impact.
     if (attached.length) {
       c.beginPath();
-      for (i = 0; i < attached.length; i++) pathPoly(c, attached[i].pts);
+      for (i = 0; i < attached.length; i++) if (!spreading(attached[i])) pathPoly(c, attached[i].pts);
+      for (i = 0; i < waves.length; i++) if (!waves[i].done) pathPoly(c, waves[i].parent);
       c.fillStyle = 'rgba(255,255,255,0.035)'; c.fill();
       // a few reflection streaks, visible only through the remaining glass
       c.save(); c.clip();
@@ -655,11 +663,21 @@ footer a:hover { color: var(--ink); }
       c.lineWidth = 3 * k; c.beginPath(); c.moveTo(PANE.x0 + 420, PANE.y1 + 40); c.lineTo(PANE.x0 + 600, PANE.y0 - 40); c.stroke();
       c.restore();
       c.beginPath();
-      for (i = 0; i < attached.length; i++) pathPoly(c, attached[i].pts);
+      for (i = 0; i < attached.length; i++) if (!spreading(attached[i])) pathPoly(c, attached[i].pts);
+      for (i = 0; i < waves.length; i++) if (!waves[i].done) pathPoly(c, waves[i].parent);
       c.strokeStyle = 'rgba(255,255,255,0.82)'; c.lineWidth = k; c.stroke();
+      for (i = 0; i < waves.length; i++) {
+        var wv = waves[i], prog = Math.min(1, (time - wv.t0) / CRACK_TIME);
+        if (wv.done) continue;
+        c.save(); c.beginPath(); c.arc(wv.ox, wv.oy, wv.maxR * (1 - (1 - prog) * (1 - prog)), 0, Math.PI * 2); c.clip();
+        c.beginPath();
+        for (var wi = 0; wi < attached.length; wi++) if (attached[wi].wave === wv) pathPoly(c, attached[wi].pts);
+        c.stroke();
+        c.restore();
+      }
       // hairline cracks
       c.beginPath();
-      for (i = 0; i < attached.length; i++) { var m = attached[i].micro; if (m) { c.moveTo(m[0], m[1]); c.lineTo(m[2], m[3]); } }
+      for (i = 0; i < attached.length; i++) { var m = attached[i].micro; if (m && !spreading(attached[i])) { c.moveTo(m[0], m[1]); c.lineTo(m[2], m[3]); } }
       c.strokeStyle = 'rgba(255,255,255,0.4)'; c.stroke();
     }
 
@@ -726,7 +744,7 @@ footer a:hover { color: var(--ink); }
   });
 
   function newPane() {
-    shards = []; bonds = []; attached = []; falling = []; resting = [];
+    shards = []; bonds = []; attached = []; falling = []; resting = []; waves = [];
     var s = makeShard([PANE.x0, PANE.y0, PANE.x1, PANE.y0, PANE.x1, PANE.y1, PANE.x0, PANE.y1], 500, 250);
     var f = frameEdge(s.pts);
     addBond(s, null, f[0], f[1], f[2]);
@@ -771,10 +789,15 @@ footer a:hover { color: var(--ink); }
     }
     if (listsDirty) rebuildLists();
     if (supportDirty) { supportDirty = false; checkSupport(); }
+    if (waves.length) {
+      staticDirty = true;
+      for (i = 0; i < waves.length; i++) if (time - waves[i].t0 >= CRACK_TIME) waves[i].done = true;
+    }
 
     for (i = 0; i < falling.length; i++) if (falling[i].state === FALLING) stepFalling(falling[i], dt);
     if (listsDirty) rebuildLists();
     if (staticDirty) drawStatic();
+    if (waves.length) waves = waves.filter(function (wv) { return !wv.done; });   // drop finished ones after their final draw
     drawFrame();
 
     workMs += performance.now() - t0; worked++;
@@ -788,7 +811,7 @@ footer a:hover { color: var(--ink); }
       sFps.textContent = Math.round(1000 / Math.max(ms, 0.05)).toLocaleString('en-US');
       workMs = 0; worked = 0; statT = now;
     }
-    if (falling.length || pending || staticDirty) requestAnimationFrame(frame);
+    if (falling.length || pending || staticDirty || waves.length) requestAnimationFrame(frame);
     else { running = false; sMs.textContent = 'idle'; sFps.textContent = '—'; }
   }
 
