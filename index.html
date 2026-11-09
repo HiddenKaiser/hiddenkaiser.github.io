@@ -303,7 +303,7 @@ section.block { padding: clamp(64px, 10vw, 128px) 0 0; }
 .case-projects .pj-cta { margin-top: auto; display: inline-flex; align-items: center; gap: 10px; width: max-content; padding: 11px 18px; border-radius: 999px; background: var(--ink); color: var(--paper); font-weight: 500; font-size: 15px; transition: background .25s, transform .25s var(--ease); }
 .case-projects:hover .pj-cta { background: var(--accent-deep); transform: translateX(3px); }
 .pj-art { position: relative; min-height: 220px; border-radius: 12px; background: var(--ink); overflow: hidden; }
-.pj-art svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.pj-art canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .pj-art .label { position: absolute; left: 10px; bottom: 10px; font-family: var(--mono); font-size: 11.5px; color: #9AA1AE; background: var(--ink); padding: 3px 6px; border-radius: 6px; }
 @media (max-width: 880px) { .case-projects { grid-template-columns: 1fr; } .pj-art { min-height: 200px; } }
 
@@ -736,8 +736,8 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
       <div class="sec-head reveal">
         <span class="sec-tag">Engineering</span>
         <div>
-          <h2 id="engineeringTitle">An engineer before I was a seller.</h2>
-          <p>I spent the first part of my career as a software developer. That's why I can scope a build, answer the hard technical question in the room, and prototype the proof of concept myself.</p>
+          <h2 id="engineeringTitle">Equal parts engineer and seller.</h2>
+          <p>I build software as well as sell it, so I can scope the solution, answer the hard technical question in the room, and prototype the proof of concept myself.</p>
         </div>
       </div>
       <a class="case case-projects reveal" href="/projects/" target="_blank" rel="noopener">
@@ -758,7 +758,7 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
           </span>
         </div>
         <div class="pj-art" aria-hidden="true">
-          <svg id="pjMesh" viewBox="0 0 400 240" preserveAspectRatio="xMidYMid meet"></svg>
+          <canvas data-cloth-preview data-center></canvas>
           <span class="label">cloth-sim · 228 points · 5 pins</span>
         </div>
       </a>
@@ -1091,36 +1091,9 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
     });
   });
 
-  /* ---------- Projects tile: a draped cloth mesh drawn once as SVG ---------- */
-  (function () {
-    var svg = document.getElementById('pjMesh'); if (!svg) return;
-    var COLS = 19, ROWS = 12, sp = 17, x0 = (400 - sp * (COLS - 1)) / 2, y0 = 26, NS = 'http://www.w3.org/2000/svg';
-    function pinned(c) { return c <= 1 || c >= COLS - 2 || c === (COLS - 1) / 2; }
-    var P = [];
-    for (var r = 0; r < ROWS; r++) { P.push([]); for (var c = 0; c < COLS; c++) {
-      var k = r / (ROWS - 1);
-      var sag = (r === 0 && !pinned(c)) ? Math.sin(Math.PI * ((c - 1) % 8) / 8) * sp * 0.35 : 0;
-      var drape = Math.sin(c / (COLS - 1) * Math.PI * 4) * sp * 0.2 * k + Math.sin(r * 0.5 + c * 0.3) * sp * 0.25 * k * k;
-      P[r].push([x0 + c * sp + drape, y0 + r * sp * 0.97 + sag + Math.abs(drape) * 0.2]);
-    } }
-    var d = '';
-    for (r = 0; r < ROWS; r++) for (c = 0; c < COLS; c++) {
-      var p = P[r][c];
-      if (c < COLS - 1) d += 'M' + p[0].toFixed(1) + ' ' + p[1].toFixed(1) + 'L' + P[r][c + 1][0].toFixed(1) + ' ' + P[r][c + 1][1].toFixed(1);
-      if (r < ROWS - 1) d += 'M' + p[0].toFixed(1) + ' ' + p[1].toFixed(1) + 'L' + P[r + 1][c][0].toFixed(1) + ' ' + P[r + 1][c][1].toFixed(1);
-    }
-    var path = document.createElementNS(NS, 'path');
-    path.setAttribute('d', d); path.setAttribute('stroke', 'rgba(243,244,246,0.5)'); path.setAttribute('stroke-width', '1'); path.setAttribute('fill', 'none');
-    svg.appendChild(path);
-    for (c = 0; c < COLS; c++) if (pinned(c)) {
-      var dot = document.createElementNS(NS, 'circle');
-      dot.setAttribute('cx', P[0][c][0].toFixed(1)); dot.setAttribute('cy', P[0][c][1].toFixed(1)); dot.setAttribute('r', '3'); dot.setAttribute('fill', '#FF4D12');
-      svg.appendChild(dot);
-    }
-  })();
-
   route();
 })();
 </script>
+<script src="cloth-preview.js" defer></script>
 </body>
 </html>
