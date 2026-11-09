@@ -19,6 +19,7 @@ export default {
       return new Response('Method Not Allowed', { status: 405, headers: { Allow: 'GET, HEAD' } });
     }
     const url = new URL(request.url);
+    if (url.protocol === 'http:') { url.protocol = 'https:'; return Response.redirect(url.href, 301); }
     let path;
     try { path = decodeURIComponent(url.pathname); } catch { return notFound(request); }
     // nothing outside _sales/, and no hidden files
