@@ -667,9 +667,9 @@ footer a:hover { color: var(--ink); }
       for (i = 0; i < waves.length; i++) if (!waves[i].done) pathPoly(c, waves[i].parent);
       c.strokeStyle = 'rgba(255,255,255,0.82)'; c.lineWidth = k; c.stroke();
       for (i = 0; i < waves.length; i++) {
-        var wv = waves[i], prog = Math.min(1, (time - wv.t0) / CRACK_TIME);
+        var wv = waves[i], prog = Math.max(0, Math.min(1, (time - wv.t0) / CRACK_TIME));
         if (wv.done) continue;
-        c.save(); c.beginPath(); c.arc(wv.ox, wv.oy, wv.maxR * (1 - (1 - prog) * (1 - prog)), 0, Math.PI * 2); c.clip();
+        c.save(); c.beginPath(); c.arc(wv.ox, wv.oy, Math.max(0, wv.maxR * (1 - (1 - prog) * (1 - prog))), 0, Math.PI * 2); c.clip();
         c.beginPath();
         for (var wi = 0; wi < attached.length; wi++) if (attached[wi].wave === wv) pathPoly(c, attached[wi].pts);
         c.stroke();
@@ -776,8 +776,13 @@ footer a:hover { color: var(--ink); }
   var running = false, last = 0, workMs = 0, worked = 0, statT = 0;
   function wake() { if (!running) { running = true; last = performance.now(); requestAnimationFrame(frame); } }
 
+  // If anything in a frame ever throws, let the next click restart the loop instead of leaving it stuck.
   function frame(now) {
-    var dt = Math.min((now - last) / 1000, 1 / 30);
+    try { frameBody(now); } catch (err) { running = false; throw err; }
+  }
+  function frameBody(now) {
+    // a rAF timestamp can be slightly earlier than the moment the loop was woken: never step backwards
+    var dt = Math.max(0, Math.min((now - last) / 1000, 1 / 30));
     last = now; time += dt;
     var t0 = performance.now(), i;
     if (listsDirty) rebuildLists();
