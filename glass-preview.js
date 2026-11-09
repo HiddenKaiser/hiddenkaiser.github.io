@@ -3,10 +3,8 @@
    jittered ring segments between neighbouring cracks, a jagged hole at the impact and a few hairlines.
    A new random pane replaces the old one every second.
 
-   Hovering with a mouse centres each new pane's impact near the cursor, and a blue ring glides after the
-   pointer (exponential smoothing, ~70 ms time constant: smooth, and only just behind it). Panes are drawn
-   once into an off-screen buffer; while the ring is visible each frame only copies that buffer and draws the
-   ring, and no frames run at all otherwise.
+   Hovering with a mouse centres each new pane's impact near the cursor. Each pane is drawn once; nothing
+   animates between panes, so no frames run at all.
 
    Cycling only happens while the canvas is on screen, the tab is visible and motion is allowed
    (no prefers-reduced-motion, no `paused` class on <html>). Otherwise it keeps showing one still pane.
@@ -14,9 +12,6 @@
    Usage: <canvas data-glass-preview></canvas> plus <script src="glass-preview.js" defer></script> (relative path). */
 (function () {
   var CYCLE_MS = 1000;
-  var RING_FOLLOW = 0.07;     // seconds: how far behind the pointer the ring glides
-  var RING_FADE = 0.12;       // seconds: ring fade in / out
-  var RING_RADIUS = 13, RING_COLOR = '46,155,255';
   var reduceMQ = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
 
   function rand(a, b) { return a + Math.random() * (b - a); }
@@ -126,62 +121,24 @@
   function init(cv) {
     var ctx = cv.getContext && cv.getContext('2d');
     if (!ctx) return;
-    var buf = document.createElement('canvas'), bctx = buf.getContext('2d');   // the current pane, drawn once
-    var w = 0, h = 0, dpr = 1, timer = 0, visible = true;
-
-    // pointer and ring state
-    var hovering = false, px = 0, py = 0, rx = 0, ry = 0, ringA = 0, animating = false, lastT = 0;
-
-    function compose() {
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.drawImage(buf, 0, 0);
-      if (ringA > 0.01) {
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        ctx.beginPath(); ctx.arc(rx, ry, RING_RADIUS, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(' + RING_COLOR + ',' + (0.22 * ringA).toFixed(3) + ')'; ctx.lineWidth = 6; ctx.stroke();   // soft glow
-        ctx.strokeStyle = 'rgba(' + RING_COLOR + ',' + ringA.toFixed(3) + ')'; ctx.lineWidth = 2; ctx.stroke();
-      }
-    }
+    var timer = 0, visible = true, hovering = false, px = 0, py = 0;
     function render() {
-      var r = cv.getBoundingClientRect();
-      dpr = Math.min(window.devicePixelRatio || 1, 2);
-      w = r.width; h = r.height;
-      var pw = Math.max(1, Math.round(w * dpr)), ph = Math.max(1, Math.round(h * dpr));
-      if (cv.width !== pw || cv.height !== ph) { cv.width = buf.width = pw; cv.height = buf.height = ph; }
-      bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      drawPane(bctx, w, h, hovering ? [px, py] : null);
-      compose();
+      var r = cv.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, 2);
+      var pw = Math.max(1, Math.round(r.width * dpr)), ph = Math.max(1, Math.round(r.height * dpr));
+      if (cv.width !== pw || cv.height !== ph) { cv.width = pw; cv.height = ph; }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawPane(ctx, r.width, r.height, hovering ? [px, py] : null);
     }
 
-    // the ring glides toward the pointer; frames only run while it is visible or still moving
-    function tick(now) {
-      var dt = lastT ? Math.min(0.05, (now - lastT) / 1000) : 1 / 60;
-      lastT = now;
-      var f = 1 - Math.exp(-dt / RING_FOLLOW);
-      rx += (px - rx) * f; ry += (py - ry) * f;
-      ringA += ((hovering ? 1 : 0) - ringA) * (1 - Math.exp(-dt / RING_FADE));
-      compose();
-      var settled = Math.abs(px - rx) < 0.05 && Math.abs(py - ry) < 0.05;
-      if (hovering ? !settled : ringA > 0.01) requestAnimationFrame(tick);
-      else { animating = false; if (!hovering) { ringA = 0; compose(); } }
-    }
-    function animate() { if (!animating) { animating = true; lastT = 0; requestAnimationFrame(tick); } }
-
+    // while a mouse hovers, new panes break near the cursor (a fresh one right away on entering)
     function local(e) { var r = cv.getBoundingClientRect(); px = e.clientX - r.left; py = e.clientY - r.top; }
     cv.addEventListener('pointerenter', function (e) {
       if (e.pointerType !== 'mouse') return;
-      local(e);
-      if (ringA < 0.05) { rx = px; ry = py; }    // appear at the cursor rather than flying in
-      hovering = true;
-      render(); schedule(); animate();            // a fresh pane centred near the cursor right away
+      local(e); hovering = true;
+      render(); schedule();
     });
-    cv.addEventListener('pointermove', function (e) {
-      if (e.pointerType !== 'mouse') return;
-      local(e);
-      if (!hovering) { hovering = true; rx = px; ry = py; }
-      animate();
-    });
-    cv.addEventListener('pointerleave', function () { if (hovering) { hovering = false; animate(); } });
+    cv.addEventListener('pointermove', function (e) { if (e.pointerType === 'mouse') { local(e); hovering = true; } });
+    cv.addEventListener('pointerleave', function () { hovering = false; });
 
     function canCycle() {
       return visible && !document.hidden && !(reduceMQ && reduceMQ.matches) && !document.documentElement.classList.contains('paused');
