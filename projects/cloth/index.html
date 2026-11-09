@@ -142,6 +142,7 @@ footer a:hover { color: var(--ink); }
           </div>
           <button type="button" class="toggle" id="wind" aria-pressed="false"><span class="sw" aria-hidden="true"></span>Wind</button>
           <button type="button" class="toggle" id="tear" aria-pressed="false"><span class="sw" aria-hidden="true"></span>Tearing</button>
+          <button type="button" class="toggle" id="selfc" aria-pressed="true"><span class="sw" aria-hidden="true"></span>Self-collision</button>
           <button type="button" class="toggle" id="surface" aria-pressed="true"><span class="sw" aria-hidden="true"></span>Shaded</button>
           <button type="button" class="toggle" id="springs" aria-pressed="true"><span class="sw" aria-hidden="true"></span>Springs</button>
           <button type="button" class="toggle" id="hidden" aria-pressed="false"><span class="sw" aria-hidden="true"></span>Shear &amp; bend</button>
@@ -164,7 +165,7 @@ footer a:hover { color: var(--ink); }
         <span><b>Drag empty space</b> to orbit</span>
         <span><b>Right-drag</b> or <kbd>Shift</kbd>+drag to cut</span>
         <span><b>Double-click</b> a point to pin or unpin it</span>
-        <span>Keys: <kbd>G</kbd> grab · <kbd>C</kbd> cut · <kbd>W</kbd> wind · <kbd>T</kbd> tearing · <kbd>R</kbd> reset</span>
+        <span>Keys: <kbd>G</kbd> grab · <kbd>C</kbd> cut · <kbd>W</kbd> wind · <kbd>T</kbd> tearing · <kbd>S</kbd> self-collision · <kbd>R</kbd> reset</span>
       </div>
     </section>
 
@@ -177,7 +178,7 @@ footer a:hover { color: var(--ink); }
       <article>
         <span class="n">02 · Constrain</span>
         <h2>Three kinds of spring</h2>
-        <p><b>Structural</b> springs join neighbours and stop stretching. <b>Shear</b> springs cross each cell diagonally so squares can't skew into diamonds. <b>Bend</b> springs skip a point, resisting sharp folds; they're what makes the cloth feel sturdy. Turn on <i>Shear &amp; bend</i> to see them.</p>
+        <p><b>Structural</b> springs join neighbours and stop stretching. <b>Shear</b> springs cross each cell diagonally so squares can't skew into diamonds. <b>Bend</b> springs skip a point, resisting sharp folds; they're what makes the cloth feel sturdy. Turn on <i>Shear &amp; bend</i> to see them. For self-collision, a spatial hash finds points that are close in space but far apart on the cloth and pushes them apart, so it can fold without passing through itself.</p>
       </article>
       <article>
         <span class="n">03 · Shade</span>
@@ -213,6 +214,10 @@ footer a:hover { color: var(--ink); }
   var STEP = 1 / 120;            // fixed physics timestep
   var TEAR_RATIO = 3;            // a structural spring snaps beyond this multiple of its rest length
   var BEND_STIFFNESS = 0.2;      // fraction of the bend correction applied per pass
+  var SELF_DIST = 15;            // self-collision: closest two non-neighbouring points may get (cloth thickness)
+  var SELF_REACH = 26;           // radius candidate pairs are gathered within (thickness + margin for two steps of motion)
+  var SELF_CELL = 2 * SELF_REACH; // hash cells twice the reach: each point then only checks 8 cells, not 27
+  var HASH_SIZE = 4096;          // spatial hash buckets (power of two)
   var MAX_GRAB_SPEED = 1800;     // world units / s a held point can travel
   var TOP = 70, FLOOR = 560;
 
@@ -236,6 +241,13 @@ footer a:hover { color: var(--ink); }
   var wind = false, tearing = false, grabbed = -1, simTime = 0;
   var target = { x: 0, y: 0, z: 0 };             // where the held point is being pulled
   var tears = [];
+  var selfCollide = true, stepCount = 0;
+
+  // self-collision scratch space, allocated once
+  var ROWI = new Int16Array(N), COLI = new Int16Array(N);
+  for (var gi = 0; gi < N; gi++) { ROWI[gi] = (gi / COLS) | 0; COLI[gi] = gi % COLS; }
+  var cellStart = new Int32Array(HASH_SIZE + 1), cellItems = new Int32Array(N), pointCell = new Int32Array(N);
+  var MAX_PAIRS = N * 16, PAIR_A = new Int32Array(MAX_PAIRS), PAIR_B = new Int32Array(MAX_PAIRS), pairCount = 0;
 
   function hEdge(r, c) { return r * (COLS - 1) + c; }
   function vEdge(r, c) { return HE + r * COLS + c; }
@@ -321,6 +333,56 @@ footer a:hover { color: var(--ink); }
     X[b] -= ox * wb; Y[b] -= oy * wb; Z[b] -= oz * wb;
   }
 
+  /* ---------- Self-collision: points as small spheres, found with a spatial hash ---------- */
+  function hashCell(ix, iy, iz) {
+    return (Math.imul(ix, 92837111) ^ Math.imul(iy, 689287499) ^ Math.imul(iz, 283923481)) & (HASH_SIZE - 1);
+  }
+  // Bin every point into a hash grid (counting sort, no allocation), then collect the pairs that are
+  // close in space but not close on the cloth. Neighbours within two grid steps are skipped: they are
+  // already held apart by the springs, and colliding them would fight the bend springs.
+  function gatherPairs() {
+    var inv = 1 / SELF_CELL, i, k, hh, q2 = SELF_REACH * SELF_REACH;
+    cellStart.fill(0);
+    for (i = 0; i < N; i++) {
+      hh = hashCell(Math.floor(X[i] * inv), Math.floor(Y[i] * inv), Math.floor(Z[i] * inv));
+      pointCell[i] = hh; cellStart[hh]++;
+    }
+    for (hh = 1; hh <= HASH_SIZE; hh++) cellStart[hh] += cellStart[hh - 1];
+    for (i = 0; i < N; i++) cellItems[--cellStart[pointCell[i]]] = i;
+    pairCount = 0;
+    for (i = 0; i < N; i++) {
+      var fx = X[i] * inv, fy = Y[i] * inv, fz = Z[i] * inv, ix = Math.floor(fx), iy = Math.floor(fy), iz = Math.floor(fz);
+      // anything within SELF_REACH lies in this cell or the neighbour on the nearer side, per axis
+      var sx = fx - ix < 0.5 ? -1 : 1, sy = fy - iy < 0.5 ? -1 : 1, sz = fz - iz < 0.5 ? -1 : 1, ri = ROWI[i], ci = COLI[i];
+      for (var ox = 0; ox < 2; ox++) for (var oy = 0; oy < 2; oy++) for (var oz = 0; oz < 2; oz++) {
+        hh = hashCell(ix + ox * sx, iy + oy * sy, iz + oz * sz);
+        for (k = cellStart[hh]; k < cellStart[hh + 1]; k++) {
+          var j = cellItems[k];
+          if (j <= i) continue;
+          var dr = ROWI[j] - ri, dc = COLI[j] - ci;
+          if (dr <= 2 && dr >= -2 && dc <= 2 && dc >= -2) continue;
+          var ex = X[j] - X[i], ey = Y[j] - Y[i], ez = Z[j] - Z[i];
+          if (ex * ex + ey * ey + ez * ez < q2 && pairCount < MAX_PAIRS) { PAIR_A[pairCount] = i; PAIR_B[pairCount] = j; pairCount++; }
+        }
+      }
+    }
+  }
+  // Push overlapping pairs apart to SELF_DIST, split by inverse mass. (No friction term: editing the
+  // previous positions for friction kept resting layers creeping forever, so the solver never slept.)
+  function resolvePairs() {
+    var m2 = SELF_DIST * SELF_DIST;
+    for (var p = 0; p < pairCount; p++) {
+      var a = PAIR_A[p], b = PAIR_B[p];
+      var dx = X[b] - X[a], dy = Y[b] - Y[a], dz = Z[b] - Z[a], d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 >= m2 || d2 < 1e-8) continue;
+      var wa = INV[a], wb = INV[b], w = wa + wb;
+      if (w === 0) continue;
+      var d = Math.sqrt(d2), k = (SELF_DIST - d) / (d * w);
+      X[a] -= dx * k * wa; Y[a] -= dy * k * wa; Z[a] -= dz * k * wa;
+      X[b] += dx * k * wb; Y[b] += dy * k * wb; Z[b] += dz * k * wb;
+    }
+  }
+
   // One fixed physics step. Returns the largest distance any point moved (for sleeping).
   function step(dt) {
     simTime += dt;
@@ -349,7 +411,11 @@ footer a:hover { color: var(--ink); }
       X[g] += gx; Y[g] += gyy; Z[g] += gz;
     }
 
-    // 3. Constraints. The first pass also finds over-stretched structural springs to tear;
+    // 3. Self-collision candidates are gathered every other step (the reach leaves margin for the motion
+    //    in between), then resolved after the first and last constraint passes
+    if (selfCollide && (stepCount++ & 1) === 0) gatherPairs();
+
+    // 4. Constraints. The first pass also finds over-stretched structural springs to tear;
     //    later passes alternate direction (symmetric Gauss-Seidel converges faster).
     var tearLimit = TEAR_RATIO * TEAR_RATIO;
     for (s = 0; s < M; s++) {
@@ -360,12 +426,14 @@ footer a:hover { color: var(--ink); }
       relax(s);
     }
     if (tears.length) { for (i = 0; i < tears.length; i++) breakEdge(tears[i]); tears.length = 0; }
+    if (selfCollide) resolvePairs();
     for (it = 1; it < ITERATIONS; it++) {
       if (it & 1) { for (s = M - 1; s >= 0; s--) relax(s); }
       else { for (s = 0; s < M; s++) relax(s); }
     }
+    if (selfCollide) resolvePairs();
 
-    // 4. Floor with friction, soft walls, and motion for the sleep check
+    // 5. Floor with friction, soft walls, and motion for the sleep check
     var maxMotion = 0;
     for (i = 0; i < N; i++) {
       if (X[i] < -300) X[i] = -300; else if (X[i] > 1300) X[i] = 1300;
@@ -881,6 +949,7 @@ footer a:hover { color: var(--ink); }
   }
   var toggleWind = toggler('wind', function () { return wind; }, function (v) { wind = v; }, true);
   var toggleTear = toggler('tear', function () { return tearing; }, function (v) { tearing = v; }, false);
+  var toggleSelf = toggler('selfc', function () { return selfCollide; }, function (v) { selfCollide = v; }, true);
   toggler('surface', function () { return showSurface; }, function (v) { showSurface = v; }, false);
   toggler('springs', function () { return showSprings; }, function (v) { showSprings = v; }, false);
   toggler('hidden', function () { return showHidden; }, function (v) { showHidden = v; }, false);
@@ -896,6 +965,7 @@ footer a:hover { color: var(--ink); }
     else if (k === 'c') setMode('cut');
     else if (k === 'w') toggleWind();
     else if (k === 't') toggleTear();
+    else if (k === 's') toggleSelf();
     else if (k === 'r') { build(); homeCamera(); wake(); }
   });
 
