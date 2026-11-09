@@ -779,13 +779,14 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
       <div class="contact-head">
         <div>
           <h2 id="contactTitle">
-            <span class="sr">Hiring for sales engineering, solution engineering or software development? Let's talk.</span>
+            <span class="sr">Hiring for sales engineering, solution engineering, software development or pre-sales? Let's talk.</span>
             <span aria-hidden="true">
               <span class="h-line">Hiring for</span>
               <span class="h-cycler" id="hCycler">
                 <span class="on">sales engineering?</span>
                 <span>solution engineering?</span>
                 <span>software development?</span>
+                <span>pre-sales?</span>
               </span>
               <span class="h-line">Let's talk.</span>
             </span>
@@ -1018,14 +1019,16 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
   document.querySelectorAll('section.block, .contact').forEach(function (s) { s.style.scrollMarginTop = '72px'; });
 
   /* ---------- Role cycler ---------- */
-  /* Hero eyebrow and contact headline rotate in step, same roles in the same order. */
+  /* Hero eyebrow and contact headline switch at the same moment; each has its own list of roles. */
   var cyclers = [document.querySelectorAll('#cycler > span'), document.querySelectorAll('#hCycler > span')];
-  var ri = 0;
+  var ri = 0; /* tick count; each reel wraps at its own length */
   if (!reduce) setInterval(function () {
     if (paused) return;
-    var next = (ri + 1) % cyclers[0].length;
-    cyclers.forEach(function (list) { list[ri].classList.remove('on'); list[next].classList.add('on'); });
-    ri = next;
+    cyclers.forEach(function (list) {
+      if (!list.length) return;
+      list[ri % list.length].classList.remove('on'); list[(ri + 1) % list.length].classList.add('on');
+    });
+    ri++;
   }, 2400);
 
   /* ---------- Live request counter (22.3M requests / hour) ---------- */
