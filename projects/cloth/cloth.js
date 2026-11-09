@@ -7,9 +7,14 @@
   /* PHYSICS-START ======================================================================
      Pure simulation: flat typed arrays, no DOM. World units; y points down, the viewer is at -z. */
   var COLS = 33, ROWS = 21, SPACING = 19;
+  var DENSITY_MULT = 1.25
+
+  var DENSITY_MIN = 0.5; // minimum density for slider
+  var DENSITY_MAX = 2.25; // maximum density for slider
+
   var GRAVITY = 1500;            // world units / s^2
   var DAMPING = 0.985;           // fraction of velocity kept per step
-  var ITERATIONS = 8;            // constraint passes per step (more passes = less stretch)
+  var ITERATIONS = 10;            // constraint passes per step (more passes = less stretch)
   var STEP = 1 / 120;            // fixed physics timestep
   var TEAR_RATIO = 3;            // a structural spring snaps beyond this multiple of its rest length
   var BEND_STIFFNESS = 0.2;      // fraction of the bend correction applied per pass
@@ -20,30 +25,70 @@
   var MAX_STEP = 12;             // no point moves further than this in one step, so nothing tunnels through
   var MAX_GRAB_SPEED = 1440;     // world units / s a held point can travel (= MAX_STEP per 1/120 s step)
   var GRAB_RADIUS = 48;          // grabbing also pulls the cloth within this radius, fading out toward the edge
-  var GRAB_PULL = 0.5;           // pull strength at the centre of that patch (applied after every solver pass)
+  var GRAB_PULL = 0.25;           // pull strength at the centre of that patch (applied after every solver pass)
   var TOP = 70, FLOOR = 560;
 
-  var N = COLS * ROWS;
-  var HE = ROWS * (COLS - 1), VE = (ROWS - 1) * COLS, NE = HE + VE;   // structural edges
-  var NC = (ROWS - 1) * (COLS - 1);                                  // grid cells
-  var MAX_SPRINGS = NE + 2 * NC + ROWS * (COLS - 2) + (ROWS - 2) * COLS;
+  // Grid sizes and every per-point / per-spring array depend on the density, so they are (re)allocated in applyDensity().
+  var N, HE, VE, NE, NC, MAX_SPRINGS;              // points, structural edges (horizontal, vertical, all), grid cells, spring capacity
   var KIND_STRUCT = 0, KIND_SHEAR = 1, KIND_BEND = 2;
 
-  var X = new Float64Array(N), Y = new Float64Array(N), Z = new Float64Array(N);
-  var PX = new Float64Array(N), PY = new Float64Array(N), PZ = new Float64Array(N);
-  var INV = new Float64Array(N);                 // inverse mass: 0 = pinned or held
-  var PIN = new Uint8Array(N);
-  var SA = new Int32Array(MAX_SPRINGS), SB = new Int32Array(MAX_SPRINGS);
-  var RR = new Float64Array(MAX_SPRINGS);        // rest length squared
-  var KIND = new Uint8Array(MAX_SPRINGS);
-  var REF1 = new Int32Array(MAX_SPRINGS), REF2 = new Int32Array(MAX_SPRINGS);  // edge / cell ids
-  var EDGE = new Uint8Array(NE);                 // 1 while a structural edge is intact
+  var X, Y, Z, PX, PY, PZ;
+  var INV;                                       // inverse mass: 0 = pinned or held
+  var PIN;
+  var SA, SB;
+  var RR;                                        // rest length squared
+  var KIND;
+  var REF1, REF2;                                // edge / cell ids
+  var EDGE;                                      // 1 while a structural edge is intact
   var M = 0;                                     // live springs, dense in [0, M)
   var topology = 0;                              // bumps whenever the mesh changes
   var wind = false, tearing = false, grabbed = -1, simTime = 0;
   var target = { x: 0, y: 0, z: 0 };             // where the held point is being pulled
   // the soft patch around the held point: which points, how strongly, and their offsets at grab time
-  var GI = new Int32Array(N), GW = new Float64Array(N), GOX = new Float64Array(N), GOY = new Float64Array(N), GOZ = new Float64Array(N), grabCount = 0;
+  var GI, GW, GOX, GOY, GOZ, grabCount = 0;
+  // self-collision scratch space, reallocated only when the density changes
+  var ROWI, COLI, cellStart = new Int32Array(HASH_SIZE + 1), cellItems, pointCell;
+  var MAX_PAIRS, PAIR_A, PAIR_B, pairCount = 0;
+
+  const originalCols = COLS;
+  const originalRows = ROWS;
+  const originalSpacing = SPACING;
+
+  // Apply the current DENSITY_MULT: more, closer points over the same cloth size. Resizes the grid and
+  // reallocates the simulation arrays; call build() afterwards to lay the cloth out again.
+  function applyDensity() {
+    COLS = Math.floor(originalCols * DENSITY_MULT);
+    ROWS = Math.floor(originalRows * DENSITY_MULT);
+    SPACING = originalSpacing / DENSITY_MULT;
+
+    N = COLS * ROWS;
+    HE = ROWS * (COLS - 1); VE = (ROWS - 1) * COLS; NE = HE + VE;
+    NC = (ROWS - 1) * (COLS - 1);
+    MAX_SPRINGS = NE + 2 * NC + ROWS * (COLS - 2) + (ROWS - 2) * COLS;
+
+    X = new Float64Array(N); Y = new Float64Array(N); Z = new Float64Array(N);
+    PX = new Float64Array(N); PY = new Float64Array(N); PZ = new Float64Array(N);
+    INV = new Float64Array(N);
+    PIN = new Uint8Array(N);
+    SA = new Int32Array(MAX_SPRINGS); SB = new Int32Array(MAX_SPRINGS);
+    RR = new Float64Array(MAX_SPRINGS);
+    KIND = new Uint8Array(MAX_SPRINGS);
+    REF1 = new Int32Array(MAX_SPRINGS); REF2 = new Int32Array(MAX_SPRINGS);
+    EDGE = new Uint8Array(NE);
+    M = 0;
+    GI = new Int32Array(N); GW = new Float64Array(N); GOX = new Float64Array(N); GOY = new Float64Array(N); GOZ = new Float64Array(N);
+    grabbed = -1; grabCount = 0;
+
+    ROWI = new Int16Array(N); COLI = new Int16Array(N);
+    for (var gi = 0; gi < N; gi++) { ROWI[gi] = (gi / COLS) | 0; COLI[gi] = gi % COLS; }
+    cellItems = new Int32Array(N); pointCell = new Int32Array(N);
+    MAX_PAIRS = N * 16; PAIR_A = new Int32Array(MAX_PAIRS); PAIR_B = new Int32Array(MAX_PAIRS); pairCount = 0;
+    topology++;
+  }
+
+  applyDensity();
+
+
   // Pull the patch toward "held point + its offset at grab time", strongest near the centre. Applied after
   // every solver pass so it holds against the springs: the grip is a hand-sized area, not a pinched point.
   function pullGrabArea() {
@@ -67,12 +112,6 @@
   }
   var tears = [];
   var selfCollide = true;
-
-  // self-collision scratch space, allocated once
-  var ROWI = new Int16Array(N), COLI = new Int16Array(N);
-  for (var gi = 0; gi < N; gi++) { ROWI[gi] = (gi / COLS) | 0; COLI[gi] = gi % COLS; }
-  var cellStart = new Int32Array(HASH_SIZE + 1), cellItems = new Int32Array(N), pointCell = new Int32Array(N);
-  var MAX_PAIRS = N * 16, PAIR_A = new Int32Array(MAX_PAIRS), PAIR_B = new Int32Array(MAX_PAIRS), pairCount = 0;
 
   function hEdge(r, c) { return r * (COLS - 1) + c; }
   function vEdge(r, c) { return HE + r * COLS + c; }
@@ -347,7 +386,7 @@
   }
 
   // world -> CSS pixel coordinates of the canvas
-  var SXp = new Float32Array(N), SYp = new Float32Array(N);
+  var SXp, SYp;                                  // sized in allocRender()
   function projectAll() {
     var m = VP;
     for (var i = 0; i < N; i++) {
@@ -447,19 +486,27 @@
     '}'].join('\n'));
 
   /* ---------- Buffers ---------- */
-  var posData = new Float32Array(N * 3), norData = new Float32Array(N * 3), uvData = new Float32Array(N * 2);
-  for (var r0 = 0; r0 < ROWS; r0++) for (var c0 = 0; c0 < COLS; c0++) {
-    uvData[(r0 * COLS + c0) * 2] = c0 / (COLS - 1); uvData[(r0 * COLS + c0) * 2 + 1] = r0 / (ROWS - 1);
-  }
-  var idxData = new Uint16Array(NC * 6), idxCount = 0, builtTopology = -1;
-  var lineData = [new Float32Array(MAX_SPRINGS * 8), new Float32Array(MAX_SPRINGS * 8), new Float32Array(MAX_SPRINGS * 8)];
-  var lineCount = [0, 0, 0];
-  var pinData = new Float32Array(N * 4), pinCount = 0;
-  var stressData = new Float32Array(N);
+  var posData, norData, uvData, idxData, lineData, pinData, stressData, RX, RY, RZ;
+  var idxCount = 0, builtTopology = -1, lineCount = [0, 0, 0], pinCount = 0;
 
   var bufPos = gl.createBuffer(), bufNor = gl.createBuffer(), bufUv = gl.createBuffer(), bufIdx = gl.createBuffer();
   var bufLines = [gl.createBuffer(), gl.createBuffer(), gl.createBuffer()], bufPins = gl.createBuffer(), bufFloor = gl.createBuffer(), bufStress = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, bufUv); gl.bufferData(gl.ARRAY_BUFFER, uvData, gl.STATIC_DRAW);
+
+  // (Re)size the drawing arrays to the current grid and upload its texture coordinates. Call after applyDensity().
+  function allocRender() {
+    posData = new Float32Array(N * 3); norData = new Float32Array(N * 3); uvData = new Float32Array(N * 2);
+    for (var r0 = 0; r0 < ROWS; r0++) for (var c0 = 0; c0 < COLS; c0++) {
+      uvData[(r0 * COLS + c0) * 2] = c0 / (COLS - 1); uvData[(r0 * COLS + c0) * 2 + 1] = r0 / (ROWS - 1);
+    }
+    idxData = new Uint16Array(NC * 6); idxCount = 0; builtTopology = -1;
+    lineData = [new Float32Array(MAX_SPRINGS * 8), new Float32Array(MAX_SPRINGS * 8), new Float32Array(MAX_SPRINGS * 8)];
+    pinData = new Float32Array(N * 4);
+    stressData = new Float32Array(N);
+    RX = new Float64Array(N); RY = new Float64Array(N); RZ = new Float64Array(N);
+    SXp = new Float32Array(N); SYp = new Float32Array(N);
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufUv); gl.bufferData(gl.ARRAY_BUFFER, uvData, gl.STATIC_DRAW);
+  }
+  allocRender();
 
   var floorVerts = [], fx, fz;
   for (fx = -400; fx <= 1400; fx += 50) floorVerts.push(fx, FLOOR, -500, 1, fx, FLOOR, 900, 1);
@@ -482,7 +529,6 @@
   }
 
   /* ---------- Drawing ---------- */
-  var RX = new Float64Array(N), RY = new Float64Array(N), RZ = new Float64Array(N);
   function attrib(prog, name, buf, size, stride, offset) {
     var loc = prog.a[name];
     if (loc === undefined) return;
@@ -788,6 +834,31 @@
   bGrab.addEventListener('click', function () { setMode('grab'); });
   bCut.addEventListener('click', function () { setMode('cut'); });
   byId('reset').addEventListener('click', function () { build(); homeCamera(); wake(); });
+
+  // Density slider (DENSITY_MIN..DENSITY_MAX). The label follows the thumb live; the mesh is only rebuilt on
+  // 'change', which fires once the user lets go (or per arrow-key step), so dragging never rebuilds mid-slide.
+  var densityBox = document.createElement('label'), densityIn = document.createElement('input'), densityOut = document.createElement('output');
+  densityBox.className = 'toggle';
+  densityBox.style.cursor = 'default';
+  densityIn.type = 'range'; densityIn.id = 'density';
+  densityIn.min = DENSITY_MIN; densityIn.max = DENSITY_MAX; densityIn.step = 0.05; densityIn.value = DENSITY_MULT;
+  densityIn.style.cssText = 'width: 110px; margin: 0; accent-color: var(--accent); cursor: pointer;';
+  densityOut.style.cssText = 'font-family: var(--mono); font-size: 12px; min-width: 4ch; text-align: right;';
+  densityOut.htmlFor = 'density';
+  function showDensity(v) { densityOut.textContent = (+v).toFixed(2) + '×'; }
+  showDensity(DENSITY_MULT);
+  densityBox.appendChild(document.createTextNode('Density'));
+  densityBox.appendChild(densityIn); densityBox.appendChild(densityOut);
+  byId('reset').parentNode.insertBefore(densityBox, byId('reset'));
+  densityIn.addEventListener('input', function () { showDensity(densityIn.value); });
+  densityIn.addEventListener('change', function () {
+    var v = Math.min(DENSITY_MAX, Math.max(DENSITY_MIN, +densityIn.value));
+    showDensity(v);
+    if (v === DENSITY_MULT) return;
+    DENSITY_MULT = v;
+    applyDensity(); allocRender(); build();
+    hover = -1; wake();
+  });
   document.addEventListener('keydown', function (e) {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     var tag = (e.target && e.target.tagName) || '';
