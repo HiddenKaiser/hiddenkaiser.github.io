@@ -83,7 +83,7 @@ button { font: inherit; color: inherit; }
 #overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .nogl { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; padding: 24px; text-align: center; color: var(--muted); }
 .nogl[hidden] { display: none; }
-#cloth { display: block; width: 100%; aspect-ratio: 1000 / 640; touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
+#cloth { display: block; width: 100%; aspect-ratio: 1000 / 640; max-height: max(320px, calc(100vh - 250px)); touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
 #cloth.dragging { cursor: grabbing; }
 #cloth.cut { cursor: crosshair; }
 .hint { display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 12px 14px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); }
@@ -150,7 +150,7 @@ footer a:hover { color: var(--ink); }
         <div class="stats" aria-live="off">
           <span><b id="sPoints">0</b> points</span>
           <span><b id="sLinks">0</b> springs</span>
-          <span title="The frame rate this device could reach if the screen refresh did not cap it: 1000 ÷ ms per frame. Counts CPU time; GPU work runs in parallel and is not included."><b id="sFps">0</b> max fps</span>
+          <span title="The frame rate this device could reach if the screen refresh did not cap it: 1000 ÷ ms per frame. Counts CPU time; GPU work runs in parallel and is not included."><b id="sFps">0</b> fps</span>
           <span title="CPU time per frame"><b id="sMs">0</b> ms/frame</span>
         </div>
       </div>
@@ -400,7 +400,7 @@ footer a:hover { color: var(--ink); }
   /* ---------- Camera: small matrix helpers (column-major, like WebGL) ---------- */
   // head-on, slightly raised, with a long lens: reads as 2.5D, and you can still orbit
   var CAM_HOME = { yaw: 0, pitch: 0.07 };
-  var cam = { yaw: CAM_HOME.yaw, pitch: CAM_HOME.pitch, dist: 1750, fov: 26 * Math.PI / 180, tx: 500, ty: 305, tz: 40 };
+  var cam = { yaw: CAM_HOME.yaw, pitch: CAM_HOME.pitch, dist: 1750, fov: 19 * Math.PI / 180, tx: 500, ty: 280, tz: 40 };
   function homeCamera() { cam.yaw = CAM_HOME.yaw; cam.pitch = CAM_HOME.pitch; updateCamera(); dirty = true; }
   var VP = new Float32Array(16), IVP = new Float32Array(16), EYE = [0, 0, 0], FWD = [0, 0, 1];
 
