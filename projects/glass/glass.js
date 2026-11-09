@@ -13,6 +13,8 @@
   var EDGE_EPS = 0.6;                                    // tolerance for "these two edges coincide"
   var ATTACHED = 0, FALLING = 1, RESTING = 2, GONE = 3;
   var CRACK_TIME = 0.06;                                 // seconds for new cracks to spread out from the impact
+  var YIELD = 0.08;                                      // radians a shard bends on its hinge before it stays bent
+  var HINGE_DAMP = 0.15;                                 // damping ratio of a bent shard's wobble
 
   var canvas = document.getElementById('glass'), ctx = canvas.getContext('2d');
   var layer = document.createElement('canvas'), lctx = layer.getContext('2d');  // cached static glass
@@ -21,6 +23,7 @@
   var bonds = [];
   var nextId = 0, time = 0, power = 1, showBonds = false;
   var staticDirty = true, supportDirty = false, listsDirty = true, bfsStamp = 0;
+  var bent = [];                                         // attached shards bent out of the pane, drawn each frame
   var waves = [];                                        // cracks still spreading: { ox, oy, t0, maxR, parent, done }
 
   function rand(a, b) { return a + Math.random() * (b - a); }
@@ -116,14 +119,14 @@
   }
 
   /* ---------- Bonds: shared edges between shards, and edges along the frame ---------- */
-  function addBond(a, b, len, mx, my) {
-    var bd = { a: a, b: b, len: len, mx: mx, my: my, ok: true };
+  function addBond(a, b, len, mx, my, seg) {
+    var bd = { a: a, b: b, len: len, mx: mx, my: my, seg: seg, ok: true };   // seg: [x1, y1, x2, y2] of the shared edge
     bonds.push(bd); a.bonds.push(bd); if (b) b.bonds.push(bd);
     return bd;
   }
-  // total length (and midpoint) of the edges two convex shards share
+  // total length (and midpoint) of the edges two convex shards share, plus the longest shared segment
   function sharedEdge(p, q) {
-    var total = 0, mx = 0, my = 0, n = p.length, m = q.length;
+    var total = 0, mx = 0, my = 0, n = p.length, m = q.length, best = 0, seg = null;
     for (var i = 0; i < n; i += 2) {
       var ax = p[i], ay = p[i + 1], dx = p[(i + 2) % n] - ax, dy = p[(i + 3) % n] - ay, L = Math.sqrt(dx * dx + dy * dy);
       if (L < 0.3) continue;
@@ -133,14 +136,17 @@
         if (Math.abs(ux * cy - uy * cx) > EDGE_EPS || Math.abs(ux * ey - uy * ex) > EDGE_EPS) continue;
         var tc = ux * cx + uy * cy, te = ux * ex + uy * ey;
         var lo = Math.max(0, Math.min(tc, te)), hi = Math.min(L, Math.max(tc, te));
-        if (hi - lo > 0.3) { var t = (lo + hi) / 2, w = hi - lo; total += w; mx += (ax + ux * t) * w; my += (ay + uy * t) * w; }
+        if (hi - lo > 0.3) {
+          var t = (lo + hi) / 2, w = hi - lo; total += w; mx += (ax + ux * t) * w; my += (ay + uy * t) * w;
+          if (w > best) { best = w; seg = [ax + ux * lo, ay + uy * lo, ax + ux * hi, ay + uy * hi]; }
+        }
       }
     }
-    return total > 0 ? [total, mx / total, my / total] : null;
+    return total > 0 ? [total, mx / total, my / total, seg] : null;
   }
-  // total length of a shard's edges that lie along the frame
-  function frameEdge(p) {
-    var total = 0, mx = 0, my = 0, n = p.length;
+  // the shard's edges that lie along the frame, one entry per side: [length, midX, midY, segment]
+  function frameEdges(p) {
+    var out = [], n = p.length;
     function on(x, y, side) {
       return side === 0 ? Math.abs(x - PANE.x0) < EDGE_EPS : side === 1 ? Math.abs(x - PANE.x1) < EDGE_EPS : side === 2 ? Math.abs(y - PANE.y0) < EDGE_EPS : Math.abs(y - PANE.y1) < EDGE_EPS;
     }
@@ -149,12 +155,12 @@
       for (var side = 0; side < 4; side++) {
         if (on(x1, y1, side) && on(x2, y2, side)) {
           var L = Math.hypot(x2 - x1, y2 - y1);
-          total += L; mx += (x1 + x2) / 2 * L; my += (y1 + y2) / 2 * L;
+          if (L > 0.3) out.push([L, (x1 + x2) / 2, (y1 + y2) / 2, [x1, y1, x2, y2]]);
           break;
         }
       }
     }
-    return total > 0.3 ? [total, mx / total, my / total] : null;
+    return out;
   }
   function boxesTouch(a, b) {
     return a.minx <= b.maxx + 1 && b.minx <= a.maxx + 1 && a.miny <= b.maxy + 1 && b.miny <= a.maxy + 1;
@@ -162,7 +168,7 @@
   function bondPair(a, b) {
     if (!boxesTouch(a, b)) return;
     var e = sharedEdge(a.pts, b.pts);
-    if (e) addBond(a, b, e[0], e[1], e[2]);
+    if (e) addBond(a, b, e[0], e[1], e[2], e[3]);
   }
 
   /* ---------- Fracture ---------- */
@@ -259,11 +265,11 @@
     for (i = 0; i < made.length; i++) {
       for (k = i + 1; k < made.length; k++) bondPair(made[i], made[k]);
       for (k = 0; k < neighbours.length; k++) bondPair(made[i], neighbours[k]);
-      if (frameBonded) { var f = frameEdge(made[i].pts); if (f) addBond(made[i], null, f[0], f[1], f[2]); }
+      if (frameBonded) { var fe = frameEdges(made[i].pts); for (var fi = 0; fi < fe.length; fi++) addBond(made[i], null, fe[fi][0], fe[fi][1], fe[fi][2], fe[fi][3]); }
     }
 
     // the impact breaks bonds near it, with a chance that falls off with distance
-    var R = Math.max(32, ringLimit * 0.72) * power;
+    var R = Math.max(32, ringLimit * 0.72) * Math.min(power, 1.15);
     for (i = 0; i < bonds.length; i++) {
       var b2 = bonds[i];
       if (!b2.ok) continue;
@@ -271,6 +277,15 @@
       if (d < R && Math.random() < 0.97 * Math.pow(1 - d / R, 0.85)) b2.ok = false;
     }
     bonds = bonds.filter(function (b3) { return b3.ok; });   // keep the live list small
+    // the blow pushes nearby glass back, away from the viewer: Smash hard, Hit a little, Tap not at all.
+    // Shards that can bend on a hinge swing back with it (applied once their hinges are known).
+    var push = power >= 1.5 ? 430 : power >= 1 ? 70 : 0, Rp = Math.max(70, ringLimit * 1.4) * power;
+    if (push) for (i = 0; i < shards.length; i++) {
+      var sh = shards[i];
+      if (sh.state !== ATTACHED) continue;
+      var dp = Math.hypot(sh.cx - ox, sh.cy - oy);
+      if (dp < Rp) sh.kick = (sh.kick || 0) + push * Math.pow(1 - dp / Rp, 1.3) * rand(0.6, 1.2);
+    }
     for (i = 0; i < made.length; i++) made[i].bonds = made[i].bonds.filter(function (b4) { return b4.ok; });
     for (i = 0; i < neighbours.length; i++) neighbours[i].bonds = neighbours[i].bonds.filter(function (b5) { return b5.ok; });
     supportDirty = true; staticDirty = true; listsDirty = true;
@@ -306,6 +321,123 @@
       for (j = 0; j < s.bonds.length; j++) if (s.bonds[j].ok) held += s.bonds[j].len;
       if (held < s.need) schedule(s, rand(0.25, 1.6));
     }
+    var tore = false;
+    for (i = 0; i < attached.length; i++) {
+      s = attached[i];
+      if (s.fallAt >= 0 && s.fallAt <= time + 0.25) continue;   // about to fall anyway
+      updateHinge(s);
+      if (s.kick) {
+        // a hard enough push tears a rigid shard's weaker bonds, leaving it swinging back on its strongest edge
+        if (!s.hinge && s.kick > 110 && tearWeakBonds(s)) { tore = true; updateHinge(s); }
+        if (s.hinge) s.thv += Math.min(10, s.kick * 0.4 / Math.max(10, s.hinge.d));
+        s.kick = 0;
+      }
+    }
+    if (tore) supportDirty = true;     // torn bonds may leave neighbours hanging: check again next frame
+  }
+
+  // Break the bonds of `s` that do not lie along its strongest edge, each with a chance that grows with the push
+  // and shrinks with the bond's length. Returns true if it is left held along a single line.
+  function tearWeakBonds(s) {
+    var best = null, i, b;
+    for (i = 0; i < s.bonds.length; i++) { b = s.bonds[i]; if (b.ok && b.seg && (!best || b.len > best.len)) best = b; }
+    if (!best) return false;
+    var g = best.seg, ux = g[2] - g[0], uy = g[3] - g[1], ul = Math.hypot(ux, uy) || 1, single = true;
+    ux /= ul; uy /= ul;
+    for (i = 0; i < s.bonds.length; i++) {
+      b = s.bonds[i];
+      if (!b.ok || b === best || !b.seg) continue;
+      var q = b.seg;
+      if (Math.abs((q[0] - g[0]) * uy - (q[1] - g[1]) * ux) <= 1.5 && Math.abs((q[2] - g[0]) * uy - (q[3] - g[1]) * ux) <= 1.5) continue;
+      if (Math.random() < Math.min(1, s.kick / (b.len * 35))) b.ok = false; else single = false;
+    }
+    return single;
+  }
+
+  /* ---------- Hinges: shards that bend on their bonds, out of the pane ---------- */
+  var TMP3 = new Float64Array(9);
+  function bentOut(s) { return !!s.hinge && Math.abs(s.th) > 0.0015; }
+
+  // A shard held along a single line (one bond, or several in a row) can bend there like a hinge. One held
+  // by bonds in different directions stays rigid in the pane.
+  function updateHinge(s) {
+    var live = [], i, best = null;
+    for (i = 0; i < s.bonds.length; i++) { var b = s.bonds[i]; if (b.ok && b.seg) { live.push(b); if (!best || b.len > best.len) best = b; } }
+    if (!best) { if (!bentOut(s)) s.hinge = null; return; }
+    var g = best.seg, ux = g[2] - g[0], uy = g[3] - g[1], ul = Math.hypot(ux, uy);
+    if (ul < 1e-6) return;
+    ux /= ul; uy /= ul;
+    var L = 0;
+    for (i = 0; i < live.length; i++) {
+      var q = live[i].seg;
+      if (Math.abs((q[0] - g[0]) * uy - (q[1] - g[1]) * ux) > 1.5 || Math.abs((q[2] - g[0]) * uy - (q[3] - g[1]) * ux) > 1.5) {
+        // held in two directions: rigid (a bent shard that somehow ends up like this just lets go)
+        if (bentOut(s)) s.snap = true; else { s.hinge = null; s.th = 0; s.thv = 0; s.rest = 0; }
+        return;
+      }
+      L += live[i].len;
+    }
+    if (s.hinge && s.hinge.bond === best) { s.hinge.L = L; tuneHinge(s); return; }
+    if (bentOut(s)) { s.snap = true; return; }                  // the bond it was bending on broke: it lets go
+    // perpendicular offset of the centroid from the hinge line
+    var rx = s.cx - g[0], ry = s.cy - g[1], t = rx * ux + ry * uy;
+    rx -= ux * t; ry -= uy * t;
+    var d = Math.hypot(rx, ry);
+    if (d < 1) { s.hinge = null; return; }
+    var sz = ux * ry - uy * rx > 0 ? 1 : -1;                     // axis sign: a positive angle swings the shard away from the viewer
+    s.hinge = { bond: best, px: g[0], py: g[1], ax: ux * sz, ay: uy * sz, d: d, ry: ry, L: L,
+                partner: best.a === s ? best.b : best.a, brk: rand(0.85, 1.25) };
+    s.th = 0; s.thv = 0; s.rest = 0;
+    tuneHinge(s);
+  }
+  function tuneHinge(s) {
+    var hg = s.hinge, k = Math.max(0.15, Math.min(3, hg.L / Math.sqrt(s.area)));
+    hg.w0 = 20 * Math.sqrt(k);                                  // stiffer the more of its edge holds it
+    hg.breakAt = Math.min(1.15, 0.3 + 0.35 * k) * hg.brk;       // and it bends further before it snaps
+  }
+
+  // Damped spring about the hinge, plus gravity: hanging below its hinge a shard is pulled back flat, standing
+  // above it gravity tips it further. Past YIELD the bend is permanent, so shards can stay hanging tilted.
+  // Returns true if it snaps off.
+  function stepHinge(s, dt) {
+    var hg = s.hinge, n = 4, h = dt / n, w2 = hg.w0 * hg.w0, c = 2 * HINGE_DAMP * hg.w0, gk = GRAVITY * hg.ry / (hg.d * hg.d);
+    if (!hg.bond.ok) return true;
+    for (var i = 0; i < n; i++) {
+      var acc = -w2 * (s.th - s.rest) - c * s.thv - gk * Math.sin(s.th);
+      s.thv += acc * h; s.th += s.thv * h;
+      if (s.th - s.rest > YIELD) s.rest = s.th - YIELD; else if (s.th - s.rest < -YIELD) s.rest = s.th + YIELD;
+    }
+    if (s.th > 1.45) { s.th = 1.45; s.thv = Math.min(0, s.thv); } else if (s.th < -1.45) { s.th = -1.45; s.thv = Math.max(0, s.thv); }
+    if (Math.abs(s.th) > hg.breakAt && (Math.abs(s.thv) > 1.2 || hg.ry < 0)) return true;   // snapped with force, or toppled over
+    var p = hg.partner;
+    if (p && p.state === ATTACHED && p.hinge && Math.abs(p.th) > 0.35 && Math.abs(p.thv) > 2) return true;   // what it hangs from swings hard: torn off
+    return false;
+  }
+
+  // A shard snaps off its hinge. A violent break can tear away the shard it hung from, if that one is barely
+  // held itself (anything hanging off a torn shard then falls with it through the support check).
+  function breakHinge(s) {
+    var hg = s.hinge, partner = hg && hg.partner, tip = hg ? Math.abs(s.thv) * hg.d : 0;
+    startFall(s);
+    if (partner && partner.state === ATTACHED && partner.fallAt < 0) {
+      var held = 0;
+      for (var i = 0; i < partner.bonds.length; i++) if (partner.bonds[i].ok) held += partner.bonds[i].len;
+      var shaky = partner.hinge ? 1 : Math.max(0, 1 - held / (partner.need * 4));
+      if (Math.random() < shaky * Math.min(1, tip / 220) * Math.min(1.5, s.area / partner.area + 0.3)) startFall(partner, s);
+      else if (partner.hinge) partner.thv += s.thv * 0.25 * Math.min(1, s.area / partner.area);
+    }
+  }
+
+  // corners of a bent shard: rotate about its hinge line, then the same perspective divide as falling shards
+  function projectHinged(s, M) {
+    var hg = s.hinge, p = s.pts, out = new Float64Array(p.length);
+    for (var i = 0; i < p.length; i += 2) {
+      var dx = p[i] - hg.px, dy = p[i + 1] - hg.py;
+      var x = hg.px + M[0] * dx + M[1] * dy, y = hg.py + M[3] * dx + M[4] * dy, z = M[6] * dx + M[7] * dy;
+      var f = FOCAL / (FOCAL + z);
+      out[i] = VX + (x - VX) * f; out[i + 1] = VY + (y - VY) * f;
+    }
+    return out;
   }
 
   /* ---------- Falling shards: flat rigid bodies in 3D ---------- */
@@ -326,17 +458,35 @@
     s.L = new Float64Array(pts.length);
     for (var i = 0; i < pts.length; i += 2) { s.L[i] = pts[i] - cx; s.L[i + 1] = pts[i + 1] - cy; }
   }
-  function startFall(s) {
+  // `from`: the shard that tore this one away, whose motion it partly inherits
+  function startFall(s, from) {
     s.state = FALLING;
     for (var i = 0; i < s.bonds.length; i++) s.bonds[i].ok = false;
     s.bonds.length = 0;
     setLocal(s, s.pts, s.cx, s.cy);
-    s.x = s.cx; s.y = s.cy; s.z = 0;
-    var dx = s.cx - s.ix, dy = s.cy - s.iy, dl = Math.hypot(dx, dy) || 1, push = rand(10, 70) * power;
-    s.vx = dx / dl * push; s.vy = rand(-30, 20); s.vz = rand(-50, 230) * power;      // mostly away, through the frame
     s.R = new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
-    var ax = rand(-1, 1), ay = rand(-1, 1), az = rand(-0.4, 0.4), al = Math.hypot(ax, ay, az) || 1, spin = rand(1.5, 8);
-    s.wx = ax / al * spin; s.wy = ay / al * spin; s.wz = az / al * spin;
+    var hg = s.hinge;
+    if (hg && (Math.abs(s.th) > 1e-4 || Math.abs(s.thv) > 1e-4)) {
+      // leave the hinge exactly as bent, with the swing it had: rotate about the hinge line
+      rotAxis(hg.ax, hg.ay, 0, s.th, s.R);
+      var R = s.R, ox = s.cx - hg.px, oy = s.cy - hg.py;
+      s.x = hg.px + R[0] * ox + R[1] * oy; s.y = hg.py + R[3] * ox + R[4] * oy; s.z = R[6] * ox + R[7] * oy;
+      var rx = s.x - hg.px, ry = s.y - hg.py, rz = s.z;                    // velocity = swing rate x (axis x offset)
+      s.vx = s.thv * (hg.ay * rz); s.vy = s.thv * (-hg.ax * rz); s.vz = s.thv * (hg.ax * ry - hg.ay * rx);
+      s.wx = hg.ax * s.thv + rand(-1, 1); s.wy = hg.ay * s.thv + rand(-1, 1); s.wz = rand(-0.6, 0.6);
+    } else if (from) {
+      s.x = s.cx; s.y = s.cy; s.z = 0;
+      s.vx = (from.vx || 0) * 0.7 + rand(-40, 40); s.vy = (from.vy || 0) * 0.7 + rand(-20, 20); s.vz = (from.vz || 0) * 0.7 + rand(-30, 60);
+      s.wx = rand(-5, 5); s.wy = rand(-5, 5); s.wz = rand(-2, 2);
+    } else {
+      s.x = s.cx; s.y = s.cy; s.z = 0;
+      var dx = s.cx - s.ix, dy = s.cy - s.iy, dl = Math.hypot(dx, dy) || 1, push = rand(10, 70) * power;
+      s.vx = dx / dl * push; s.vy = rand(-30, 20);
+      s.vz = (power >= 1.5 ? rand(120, 340) : rand(-50, 230)) * power;     // mostly away, through the frame; Smash hardest
+      var ax = rand(-1, 1), ay = rand(-1, 1), az = rand(-0.4, 0.4), al = Math.hypot(ax, ay, az) || 1, spin = rand(1.5, 8);
+      s.wx = ax / al * spin; s.wy = ay / al * spin; s.wz = az / al * spin;
+    }
+    s.hinge = null; s.th = 0; s.thv = 0;
     s.landed = false;
     supportDirty = true; staticDirty = true; listsDirty = true;
   }
@@ -431,6 +581,7 @@
   }
 
   function spreading(s) { return s.wave && !s.wave.done; }
+  function flat(s) { return !spreading(s) && !bentOut(s); }
   function drawStatic() {
     var c = lctx, i, s, k = 1 / scale;
     c.setTransform(1, 0, 0, 1, 0, 0);
@@ -465,7 +616,7 @@
     // their intact parent instead, and their outlines are revealed inside a circle growing from the impact.
     if (attached.length) {
       c.beginPath();
-      for (i = 0; i < attached.length; i++) if (!spreading(attached[i])) pathPoly(c, attached[i].pts);
+      for (i = 0; i < attached.length; i++) if (flat(attached[i])) pathPoly(c, attached[i].pts);
       for (i = 0; i < waves.length; i++) if (!waves[i].done) pathPoly(c, waves[i].parent);
       c.fillStyle = 'rgba(255,255,255,0.035)'; c.fill();
       // a few reflection streaks, visible only through the remaining glass
@@ -476,7 +627,7 @@
       c.lineWidth = 3 * k; c.beginPath(); c.moveTo(PANE.x0 + 420, PANE.y1 + 40); c.lineTo(PANE.x0 + 600, PANE.y0 - 40); c.stroke();
       c.restore();
       c.beginPath();
-      for (i = 0; i < attached.length; i++) if (!spreading(attached[i])) pathPoly(c, attached[i].pts);
+      for (i = 0; i < attached.length; i++) if (flat(attached[i])) pathPoly(c, attached[i].pts);
       for (i = 0; i < waves.length; i++) if (!waves[i].done) pathPoly(c, waves[i].parent);
       c.strokeStyle = 'rgba(255,255,255,0.82)'; c.lineWidth = k; c.stroke();
       for (i = 0; i < waves.length; i++) {
@@ -490,7 +641,7 @@
       }
       // hairline cracks
       c.beginPath();
-      for (i = 0; i < attached.length; i++) { var m = attached[i].micro; if (m && !spreading(attached[i])) { c.moveTo(m[0], m[1]); c.lineTo(m[2], m[3]); } }
+      for (i = 0; i < attached.length; i++) { var m = attached[i].micro; if (m && flat(attached[i])) { c.moveTo(m[0], m[1]); c.lineTo(m[2], m[3]); } }
       c.strokeStyle = 'rgba(255,255,255,0.4)'; c.stroke();
     }
 
@@ -515,9 +666,19 @@
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(layer, 0, 0);
-    if (!falling.length) return;
+    if (!falling.length && !bent.length) return;
     ctx.setTransform(scale * dpr, 0, 0, scale * dpr, offX * dpr, offY * dpr);
     ctx.lineJoin = 'round'; ctx.lineWidth = 1 / scale;
+    for (var b = 0; b < bent.length; b++) {
+      // still bonded, but bent out of the pane on its hinge
+      var sb = bent[b];
+      if (sb.state !== ATTACHED || !sb.hinge) continue;          // torn away earlier this frame
+      var M = rotAxis(sb.hinge.ax, sb.hinge.ay, 0, sb.th, TMP3);
+      var gl = Math.pow(Math.abs(M[2] * LIGHT[0] + M[5] * LIGHT[1] + M[8] * LIGHT[2]), 10);
+      ctx.beginPath(); pathPoly(ctx, projectHinged(sb, M));
+      ctx.fillStyle = 'rgba(255,255,255,' + (0.035 + 0.35 * gl).toFixed(3) + ')'; ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,' + (0.82 + 0.18 * gl).toFixed(3) + ')'; ctx.stroke();
+    }
     for (var i = 0; i < falling.length; i++) {
       var s = falling[i], p = project(s), R = s.R;
       // glint: a sharp highlight when the shard's face turns toward the light (either side)
@@ -551,16 +712,19 @@
     for (var i = attached.length - 1; i >= 0; i--) {
       var s = attached[i];
       if (x < s.minx || x > s.maxx || y < s.miny || y > s.maxy) continue;
-      if (insideConvex(s.pts, x, y)) { shatter(s, x, y); break; }
+      if (!insideConvex(s.pts, x, y)) continue;
+      if (bentOut(s)) { s.thv += (power >= 1.5 ? 16 : power >= 1 ? 7 : 3) * (s.th >= 0 ? 1 : -1); wake(); }
+      else shatter(s, x, y);
+      break;
     }
     e.preventDefault();
   });
 
   function newPane() {
-    shards = []; bonds = []; attached = []; falling = []; resting = []; waves = [];
+    shards = []; bonds = []; attached = []; falling = []; resting = []; waves = []; bent = [];
     var s = makeShard([PANE.x0, PANE.y0, PANE.x1, PANE.y0, PANE.x1, PANE.y1, PANE.x0, PANE.y1], 500, 250);
-    var f = frameEdge(s.pts);
-    addBond(s, null, f[0], f[1], f[2]);
+    var fe = frameEdges(s.pts);
+    for (var fi = 0; fi < fe.length; fi++) addBond(s, null, fe[fi][0], fe[fi][1], fe[fi][2], fe[fi][3]);
     supportDirty = false; staticDirty = true; listsDirty = true;
     wake();
   }
@@ -612,6 +776,20 @@
       for (i = 0; i < waves.length; i++) if (time - waves[i].t0 >= CRACK_TIME) waves[i].done = true;
     }
 
+    // bent shards swing on their hinges; too far with enough force and they snap off
+    var hingeMoving = false;
+    bent.length = 0;
+    for (i = 0; i < attached.length; i++) {
+      var sa = attached[i];
+      if (sa.state !== ATTACHED || !sa.hinge) continue;
+      if (sa.snap) { sa.snap = false; breakHinge(sa); continue; }
+      if ((Math.abs(sa.th) > 1e-4 || Math.abs(sa.thv) > 1e-4) && stepHinge(sa, dt)) { breakHinge(sa); continue; }
+      var isBent = bentOut(sa);
+      if (isBent !== !!sa.wasBent) { sa.wasBent = isBent; staticDirty = true; }
+      if (isBent) bent.push(sa);
+      if (Math.abs(sa.thv) > 0.02) hingeMoving = true;
+    }
+    if (listsDirty) rebuildLists();
     for (i = 0; i < falling.length; i++) if (falling[i].state === FALLING) stepFalling(falling[i], dt);
     if (listsDirty) rebuildLists();
     if (staticDirty) drawStatic();
@@ -629,7 +807,7 @@
       sFps.textContent = Math.round(1000 / Math.max(ms, 0.05)).toLocaleString('en-US');
       workMs = 0; worked = 0; statT = now;
     }
-    if (falling.length || pending || staticDirty || waves.length) requestAnimationFrame(frame);
+    if (falling.length || pending || staticDirty || waves.length || hingeMoving) requestAnimationFrame(frame);
     else { running = false; sMs.textContent = 'idle'; sFps.textContent = '—'; }
   }
 
