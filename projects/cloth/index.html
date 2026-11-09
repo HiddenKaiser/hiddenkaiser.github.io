@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cloth Simulation | Jack Keuler</title>
+<meta name="description" content="Interactive mass-spring cloth simulation using Verlet integration and distance constraints. Grab, throw, tear and re-pin it. Ported from Jack Keuler's Luau cloth simulator.">
+<meta name="author" content="Jack Keuler">
+<link rel="canonical" href="https://jackkeuler.com/projects/cloth/">
+<meta name="theme-color" content="#F3F4F6">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://jackkeuler.com/projects/cloth/">
+<meta property="og:site_name" content="Jack Keuler">
+<meta property="og:title" content="Cloth Simulation | Jack Keuler">
+<meta property="og:description" content="An interactive Verlet cloth you can grab, throw, tear and re-pin.">
+<meta property="og:image" content="https://jackkeuler.com/photo.jpg">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,300..800&family=Geist:wght@300..700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --paper: #F3F4F6; --surface: #FFFFFF; --ink: #0D1015; --muted: #5B6271; --line: #DCE0E7;
+  --accent: #FF4D12; --accent-deep: #C23A06; --accent-wash: #FFEDE5;
+  --display: "Bricolage Grotesque", "Arial Narrow", system-ui, sans-serif;
+  --body: "Geist", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --radius: 14px; --ease: cubic-bezier(.2, .8, .2, 1);
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--body); line-height: 1.55; -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+h1, h2, h3 { margin: 0; text-wrap: balance; font-family: var(--display); font-weight: 700; letter-spacing: -0.02em; line-height: 1.02; }
+p { margin: 0; }
+a { color: inherit; }
+button { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+.wrap { width: 100%; max-width: 1200px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 40px); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* Nav (matches the portfolio) */
+.nav { position: sticky; top: 0; z-index: 50; background: color-mix(in srgb, var(--paper) 82%, transparent); backdrop-filter: saturate(1.4) blur(14px); -webkit-backdrop-filter: saturate(1.4) blur(14px); border-bottom: 1px solid var(--line); }
+.nav .wrap { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: 64px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 600; }
+.brand-mark { width: 32px; height: 32px; border-radius: 9px; background: var(--ink); color: var(--paper); display: grid; place-items: center; font-family: var(--display); font-weight: 800; font-size: 14px; letter-spacing: -0.04em; transition: transform .5s var(--ease), background .3s; }
+.brand:hover .brand-mark { transform: rotate(-8deg) scale(1.05); background: var(--accent); }
+.nav-links { display: flex; align-items: center; gap: 4px; }
+.nav-link { padding: 8px 12px; border-radius: 999px; color: var(--muted); font-size: 14px; text-decoration: none; transition: color .2s, background .2s; }
+.nav-link:hover, .nav-link[aria-current="page"] { color: var(--ink); background: var(--surface); }
+.nav-cta { display: inline-flex; align-items: center; gap: 8px; padding: 9px 16px; border-radius: 999px; background: var(--ink); color: var(--paper); text-decoration: none; font-size: 14px; font-weight: 500; transition: transform .25s var(--ease), background .25s; }
+.nav-cta:hover { background: var(--accent); transform: translateY(-1px); }
+@media (max-width: 520px) { .brand span:last-child { display: none; } }
+
+/* Header */
+.head { padding: clamp(28px, 5vw, 56px) 0 clamp(20px, 3vw, 28px); }
+.back { font-family: var(--mono); font-size: 13px; color: var(--muted); text-decoration: none; display: inline-flex; gap: 8px; align-items: center; }
+.back:hover { color: var(--ink); }
+.head h1 { margin-top: 14px; font-size: clamp(2.6rem, 7vw, 5rem); font-variation-settings: "wdth" 75, "opsz" 96; font-weight: 800; letter-spacing: -0.045em; line-height: .9; }
+.head h1 .dot { color: var(--accent); }
+.head p { margin-top: 14px; max-width: 62ch; color: var(--muted); font-size: 1.05rem; }
+
+/* Simulation panel */
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 18px; overflow: hidden; box-shadow: 0 1px 0 rgba(13,16,21,.03), 0 30px 60px -36px rgba(13,16,21,.3); }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.seg { display: inline-flex; padding: 3px; background: var(--paper); border-radius: 999px; border: 1px solid var(--line); }
+.seg button { border: 0; background: transparent; padding: 6px 14px; border-radius: 999px; font-size: 13.5px; cursor: pointer; color: var(--muted); transition: background .2s, color .2s; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.toggle { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px 6px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); font-size: 13.5px; cursor: pointer; transition: border-color .2s; }
+.toggle:hover { border-color: var(--ink); }
+.toggle .sw { width: 28px; height: 16px; border-radius: 999px; background: var(--line); position: relative; transition: background .2s; flex: none; }
+.toggle .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform .2s var(--ease); }
+.toggle[aria-pressed="true"] .sw { background: var(--accent); }
+.toggle[aria-pressed="true"] .sw::after { transform: translateX(12px); }
+.reset { border: 1px solid var(--ink); background: var(--ink); color: var(--paper); padding: 7px 14px; border-radius: 999px; font-size: 13.5px; cursor: pointer; transition: background .2s, border-color .2s; }
+.reset:hover { background: var(--accent); border-color: var(--accent); }
+.stats { display: flex; gap: 14px; font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); }
+.stats b { color: var(--ink); font-weight: 500; }
+
+.stage { position: relative; background-color: #FAFAFB; background-image: radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--ink) 10%, transparent) 1px, transparent 0); background-size: 22px 22px; }
+#cloth { display: block; width: 100%; aspect-ratio: 1000 / 640; touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
+#cloth.dragging { cursor: grabbing; }
+#cloth.cut { cursor: crosshair; }
+.hint { display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 12px 14px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+.hint kbd { font-family: var(--mono); font-size: 11.5px; padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; background: var(--paper); color: var(--ink); }
+
+/* Explainer */
+.explain { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 16px; }
+.explain article { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; }
+.explain .n { font-family: var(--mono); font-size: 12px; color: var(--accent-deep); }
+.explain h2 { margin-top: 8px; font-size: 1.3rem; font-variation-settings: "wdth" 85; }
+.explain p { margin-top: 8px; font-size: 14.5px; color: var(--muted); }
+.explain code { font-family: var(--mono); font-size: 12.5px; background: var(--paper); padding: 1px 5px; border-radius: 5px; color: var(--ink); }
+.origin { margin-top: 16px; padding: 22px; border-radius: var(--radius); background: var(--ink); color: #B7BDC8; font-size: 14.5px; display: grid; grid-template-columns: 160px 1fr; gap: 16px; }
+.origin b { font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--paper); letter-spacing: .04em; text-transform: uppercase; }
+@media (max-width: 860px) { .explain { grid-template-columns: 1fr; } .origin { grid-template-columns: 1fr; gap: 6px; } }
+
+main { padding-bottom: clamp(56px, 8vw, 96px); }
+footer { border-top: 1px solid var(--line); padding: 28px 0 40px; color: var(--muted); font-size: 13px; }
+footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
+footer a { text-decoration: none; }
+footer a:hover { color: var(--ink); }
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="/" aria-label="Jack Keuler, portfolio home">
+      <span class="brand-mark">JK</span>
+      <span>Jack Keuler</span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a class="nav-link" href="/">Portfolio</a>
+      <a class="nav-link" href="/projects/" aria-current="page">Projects</a>
+      <a class="nav-cta" href="/#resume">Resume</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="head">
+    <div class="wrap">
+      <a class="back" href="/projects/">← All projects</a>
+      <h1>Cloth simulation<span class="dot">.</span></h1>
+      <p>A grid of point masses joined by springs, stepped with Verlet integration. Grab it, fling it, slice it, or move the pins and watch it settle.</p>
+    </div>
+  </section>
+
+  <div class="wrap">
+    <section class="panel" aria-label="Cloth simulation">
+      <div class="toolbar">
+        <div class="tools">
+          <div class="seg" role="group" aria-label="Pointer mode">
+            <button type="button" id="modeGrab" aria-pressed="true">Grab</button>
+            <button type="button" id="modeCut" aria-pressed="false">Cut</button>
+          </div>
+          <button type="button" class="toggle" id="wind" aria-pressed="false"><span class="sw" aria-hidden="true"></span>Wind</button>
+          <button type="button" class="toggle" id="tear" aria-pressed="true"><span class="sw" aria-hidden="true"></span>Tearing</button>
+          <button type="button" class="reset" id="reset">Reset</button>
+        </div>
+        <div class="stats" aria-live="off">
+          <span><b id="sPoints">0</b> points</span>
+          <span><b id="sLinks">0</b> springs</span>
+          <span><b id="sFps">0</b> fps</span>
+        </div>
+      </div>
+      <div class="stage">
+        <canvas id="cloth" role="img" aria-label="Interactive cloth made of connected lines. Drag to pull it; use Cut mode or right-click to slice it."></canvas>
+      </div>
+      <div class="hint">
+        <span><b>Drag</b> to pull and throw</span>
+        <span><b>Right-drag</b> or <kbd>Shift</kbd>+drag to cut</span>
+        <span><b>Double-click</b> a point to pin or unpin it</span>
+        <span>Keys: <kbd>G</kbd> grab · <kbd>C</kbd> cut · <kbd>W</kbd> wind · <kbd>T</kbd> tearing · <kbd>R</kbd> reset</span>
+      </div>
+    </section>
+
+    <section class="explain" aria-label="How it works">
+      <article>
+        <span class="n">01 · Integrate</span>
+        <h2>Verlet integration</h2>
+        <p>Each point stores only its current and previous position. Velocity is implied by the difference, so a step is <code>x' = x + (x − x₀)·damping + g·dt²</code>. No velocities to drift out of sync, and constraints can move points directly.</p>
+      </article>
+      <article>
+        <span class="n">02 · Constrain</span>
+        <h2>Spring constraints</h2>
+        <p>Neighbouring points are linked by springs with a rest length. Each pass pulls stretched springs back to length, splitting the correction between both ends. Like the original, springs only resist stretching, so the cloth can bunch and fold.</p>
+      </article>
+      <article>
+        <span class="n">03 · Break</span>
+        <h2>Tearing and pins</h2>
+        <p>When tearing is on, a spring stretched past three times its rest length snaps. Pinned points ignore gravity and corrections, and dragging one moves the pin itself. Spring colour shows strain.</p>
+      </article>
+    </section>
+
+    <div class="origin">
+      <b>Original</b>
+      <p>I first wrote this in Luau for Roblox: the cloth is an EditableMesh whose vertices are driven by the solver, with sphere and cylinder colliders, a custom vector type to cut allocation, and a benchmarking mode. Rendering the mesh, not the physics, turned out to be the bottleneck. This page is a lightweight JavaScript port of the same solver, drawn as plain lines on a canvas.</p>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© 2026 Jack Keuler</span>
+    <a href="/projects/">← Back to projects</a>
+  </div>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+  /* ---------- World & cloth setup (world units, independent of screen size) ---------- */
+  var W = 1000, H = 640;
+  var COLS = 33, ROWS = 21, SPACING = 19;
+  var GRAVITY = 1500;            // world units / s^2
+  var DAMPING = 0.985;           // fraction of velocity kept per step
+  var ITERATIONS = 5;            // constraint relaxation passes per step
+  var STEP = 1 / 120;            // fixed physics timestep
+  var TEAR_RATIO = 3;            // spring snaps beyond this multiple of rest length
+  var GRAB_RADIUS_PX = 30;       // pointer pick radius in CSS pixels
+  var MAX_GRAB_SPEED = 1800;     // world units / s a held point can travel
+
+  var canvas = document.getElementById('cloth');
+  var ctx = canvas.getContext('2d');
+  var points = [], springs = [];
+  var scale = 1, dpr = 1;
+  var mode = 'grab', wind = false, tearing = true;
+  var grabbed = null, hover = null;
+  var pointer = { x: 0, y: 0, lx: 0, ly: 0, vx: 0, vy: 0, down: false, cutting: false, inside: false };
+  var simTime = 0;
+
+  function isPinnedColumn(c) {
+    // same pattern as the Luau original: two points at each top corner plus the middle
+    return c <= 1 || c >= COLS - 2 || c === Math.floor(COLS / 2);
+  }
+
+  function build() {
+    points = []; springs = [];
+    var x0 = (W - (COLS - 1) * SPACING) / 2, y0 = 54;
+    for (var r = 0; r < ROWS; r++) {
+      for (var c = 0; c < COLS; c++) {
+        var x = x0 + c * SPACING, y = y0 + r * SPACING;
+        points.push({ x: x, y: y, px: x, py: y, pinned: r === 0 && isPinnedColumn(c) });
+      }
+    }
+    for (r = 0; r < ROWS; r++) {
+      for (c = 0; c < COLS; c++) {
+        var i = r * COLS + c;
+        if (c < COLS - 1) springs.push({ a: points[i], b: points[i + 1], len: SPACING, on: true, strain: 1 });
+        if (r < ROWS - 1) springs.push({ a: points[i], b: points[i + COLS], len: SPACING, on: true, strain: 1 });
+      }
+    }
+    grabbed = null; hover = null;
+  }
+
+  /* ---------- Physics ---------- */
+  function fixed(p) { return p.pinned || p === grabbed; }
+
+  function step(dt) {
+    simTime += dt;
+    var dt2 = dt * dt, gust = 0;
+    if (wind) gust = 520 + Math.sin(simTime * 0.9) * 300 + Math.sin(simTime * 2.3 + 1.7) * 160;
+
+    for (var i = 0; i < points.length; i++) {
+      var p = points[i];
+      if (fixed(p)) continue;
+      var vx = (p.x - p.px) * DAMPING, vy = (p.y - p.py) * DAMPING;
+      p.px = p.x; p.py = p.y;
+      var ax = 0, ay = GRAVITY;
+      if (wind) {
+        var ripple = 0.55 + 0.45 * Math.sin(simTime * 3.1 + p.y * 0.021 + p.x * 0.004);
+        ax += gust * ripple; ay -= gust * 0.18 * ripple;
+      }
+      p.x += vx + ax * dt2;
+      p.y += vy + ay * dt2;
+    }
+
+    if (grabbed) {
+      // chase the pointer at a capped speed so a fast flick tugs the cloth instead of teleporting a point
+      grabbed.px = grabbed.x; grabbed.py = grabbed.y;
+      var gx = pointer.x - grabbed.x, gy = pointer.y - grabbed.y, gd = Math.sqrt(gx * gx + gy * gy);
+      var maxMove = MAX_GRAB_SPEED * dt;
+      if (gd > maxMove) { gx *= maxMove / gd; gy *= maxMove / gd; }
+      grabbed.x += gx; grabbed.y += gy;
+    }
+
+    for (var it = 0; it < ITERATIONS; it++) {
+      for (var s = 0; s < springs.length; s++) {
+        var sp = springs[s];
+        if (!sp.on) continue;
+        var a = sp.a, b = sp.b;
+        var dx = b.x - a.x, dy = b.y - a.y;
+        var d = Math.sqrt(dx * dx + dy * dy) || 1e-6;
+        if (it === 0) sp.strain = d / sp.len;
+        if (d <= sp.len) continue;                     // springs resist stretch only
+        if (tearing && d > sp.len * TEAR_RATIO) { sp.on = false; continue; }
+        var fa = !fixed(a), fb = !fixed(b);
+        if (!fa && !fb) continue;
+        var k = (d - sp.len) / d, ox = dx * k, oy = dy * k;
+        if (fa && fb) { a.x += ox * 0.5; a.y += oy * 0.5; b.x -= ox * 0.5; b.y -= oy * 0.5; }
+        else if (fa) { a.x += ox; a.y += oy; }
+        else { b.x -= ox; b.y -= oy; }
+      }
+    }
+
+    // keep everything inside the stage; the floor has friction
+    for (i = 0; i < points.length; i++) {
+      p = points[i];
+      if (p.x < 0) { p.x = 0; p.px = p.x + (p.x - p.px) * 0.5; }
+      else if (p.x > W) { p.x = W; p.px = p.x + (p.x - p.px) * 0.5; }
+      if (p.y > H) { p.y = H; p.py = H; p.px = p.x - (p.x - p.px) * 0.6; }
+      else if (p.y < 0) { p.y = 0; p.py = 0; }
+    }
+  }
+
+  /* ---------- Rendering ---------- */
+  var INK = '#0D1015', ACCENT = '#FF4D12';
+  function draw() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+    ctx.lineCap = 'round';
+    ctx.lineWidth = 1.25 / scale;
+
+    // bucket springs by strain so the whole cloth is a handful of strokes
+    var buckets = [[], [], []];
+    for (var s = 0; s < springs.length; s++) {
+      var sp = springs[s];
+      if (!sp.on) continue;
+      buckets[sp.strain < 1.25 ? 0 : sp.strain < 1.9 ? 1 : 2].push(sp);
+    }
+    var styles = ['rgba(13,16,21,0.78)', 'rgba(194,58,6,0.85)', ACCENT];
+    for (var bi = 0; bi < 3; bi++) {
+      if (!buckets[bi].length) continue;
+      ctx.strokeStyle = styles[bi];
+      ctx.beginPath();
+      for (var j = 0; j < buckets[bi].length; j++) {
+        var q = buckets[bi][j];
+        ctx.moveTo(q.a.x, q.a.y); ctx.lineTo(q.b.x, q.b.y);
+      }
+      ctx.stroke();
+    }
+
+    // pins
+    ctx.fillStyle = INK;
+    var pr = 3.6 / scale;
+    for (var i = 0; i < points.length; i++) {
+      var p = points[i];
+      if (!p.pinned) continue;
+      ctx.beginPath(); ctx.arc(p.x, p.y, pr, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // hover / grab indicator
+    var focus = grabbed || (mode === 'grab' && pointer.inside && !pointer.down ? hover : null);
+    if (focus) {
+      ctx.strokeStyle = ACCENT; ctx.lineWidth = 2 / scale;
+      ctx.beginPath(); ctx.arc(focus.x, focus.y, (grabbed ? 9 : 7) / scale, 0, Math.PI * 2); ctx.stroke();
+    }
+    if (pointer.cutting && pointer.inside) {
+      ctx.fillStyle = 'rgba(255,77,18,0.18)';
+      ctx.beginPath(); ctx.arc(pointer.x, pointer.y, 10 / scale, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  /* ---------- Sizing ---------- */
+  function resize() {
+    var rect = canvas.getBoundingClientRect();
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    scale = rect.width / W;
+    canvas.width = Math.max(1, Math.round(rect.width * dpr));
+    canvas.height = Math.max(1, Math.round(rect.height * dpr));
+    draw();
+  }
+
+  /* ---------- Pointer interaction ---------- */
+  function toWorld(e) {
+    var rect = canvas.getBoundingClientRect();
+    return { x: (e.clientX - rect.left) / rect.width * W, y: (e.clientY - rect.top) / rect.height * H };
+  }
+  function nearestPoint(x, y) {
+    var best = null, bestD = Math.pow(GRAB_RADIUS_PX / scale, 2);
+    for (var i = 0; i < points.length; i++) {
+      var dx = points[i].x - x, dy = points[i].y - y, d = dx * dx + dy * dy;
+      if (d < bestD) { bestD = d; best = points[i]; }
+    }
+    return best;
+  }
+  function segIntersect(p1x, p1y, p2x, p2y, p3x, p3y, p4x, p4y) {
+    var d = (p2x - p1x) * (p4y - p3y) - (p2y - p1y) * (p4x - p3x);
+    if (d === 0) return false;
+    var t = ((p3x - p1x) * (p4y - p3y) - (p3y - p1y) * (p4x - p3x)) / d;
+    var u = ((p3x - p1x) * (p2y - p1y) - (p3y - p1y) * (p2x - p1x)) / d;
+    return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+  }
+  function cutAlong(x1, y1, x2, y2) {
+    var r2 = Math.pow(7 / scale, 2);
+    for (var s = 0; s < springs.length; s++) {
+      var sp = springs[s];
+      if (!sp.on) continue;
+      if (segIntersect(x1, y1, x2, y2, sp.a.x, sp.a.y, sp.b.x, sp.b.y)) { sp.on = false; continue; }
+      var mx = (sp.a.x + sp.b.x) / 2 - x2, my = (sp.a.y + sp.b.y) / 2 - y2;
+      if (mx * mx + my * my < r2) sp.on = false;
+    }
+  }
+  function updateCursor() {
+    canvas.classList.toggle('cut', mode === 'cut' || pointer.cutting);
+    canvas.classList.toggle('dragging', !!grabbed);
+  }
+
+  canvas.addEventListener('pointerdown', function (e) {
+    var w = toWorld(e);
+    pointer.x = pointer.lx = w.x; pointer.y = pointer.ly = w.y; pointer.vx = pointer.vy = 0;
+    pointer.down = true; pointer.inside = true;
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+    pointer.cutting = mode === 'cut' || e.button === 2 || e.shiftKey;
+    if (pointer.cutting) cutAlong(w.x, w.y, w.x, w.y);
+    else grabbed = nearestPoint(w.x, w.y);
+    updateCursor();
+    e.preventDefault();
+  });
+  canvas.addEventListener('pointermove', function (e) {
+    var w = toWorld(e);
+    pointer.inside = true;
+    if (pointer.down) {
+      var dt = Math.max(e.timeStamp - (pointer.t || e.timeStamp), 1) / 1000;
+      pointer.vx = pointer.vx * 0.6 + (w.x - pointer.x) / dt * 0.4;
+      pointer.vy = pointer.vy * 0.6 + (w.y - pointer.y) / dt * 0.4;
+      if (pointer.cutting) cutAlong(pointer.x, pointer.y, w.x, w.y);
+    } else if (mode === 'grab') {
+      hover = nearestPoint(w.x, w.y);
+    }
+    pointer.t = e.timeStamp;
+    pointer.x = w.x; pointer.y = w.y;
+  });
+  function release() {
+    if (grabbed) {
+      if (grabbed.pinned) { grabbed.px = grabbed.x; grabbed.py = grabbed.y; }
+      else {
+        // carry the pointer's velocity into the cloth so it can be thrown
+        var vx = Math.max(-4000, Math.min(4000, pointer.vx)), vy = Math.max(-4000, Math.min(4000, pointer.vy));
+        grabbed.px = grabbed.x - vx * STEP; grabbed.py = grabbed.y - vy * STEP;
+      }
+    }
+    grabbed = null; pointer.down = false; pointer.cutting = false;
+    updateCursor();
+  }
+  canvas.addEventListener('pointerup', release);
+  canvas.addEventListener('pointercancel', release);
+  canvas.addEventListener('pointerleave', function () { if (!pointer.down) { pointer.inside = false; hover = null; } });
+  canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  canvas.addEventListener('dblclick', function (e) {
+    var w = toWorld(e), p = nearestPoint(w.x, w.y);
+    if (p) { p.pinned = !p.pinned; p.px = p.x; p.py = p.y; }
+  });
+
+  /* ---------- Controls ---------- */
+  var bGrab = document.getElementById('modeGrab'), bCut = document.getElementById('modeCut');
+  var bWind = document.getElementById('wind'), bTear = document.getElementById('tear');
+  function setMode(m) {
+    mode = m;
+    bGrab.setAttribute('aria-pressed', String(m === 'grab'));
+    bCut.setAttribute('aria-pressed', String(m === 'cut'));
+    hover = null; updateCursor();
+  }
+  function toggleWind() { wind = !wind; bWind.setAttribute('aria-pressed', String(wind)); }
+  function toggleTear() { tearing = !tearing; bTear.setAttribute('aria-pressed', String(tearing)); }
+  bGrab.addEventListener('click', function () { setMode('grab'); });
+  bCut.addEventListener('click', function () { setMode('cut'); });
+  bWind.addEventListener('click', toggleWind);
+  bTear.addEventListener('click', toggleTear);
+  document.getElementById('reset').addEventListener('click', build);
+  document.addEventListener('keydown', function (e) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    var tag = (e.target && e.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    var k = e.key.toLowerCase();
+    if (k === 'g') setMode('grab');
+    else if (k === 'c') setMode('cut');
+    else if (k === 'w') toggleWind();
+    else if (k === 't') toggleTear();
+    else if (k === 'r') build();
+  });
+
+  /* ---------- Loop ---------- */
+  var sPoints = document.getElementById('sPoints'), sLinks = document.getElementById('sLinks'), sFps = document.getElementById('sFps');
+  var acc = 0, last = performance.now(), frames = 0, fpsT = last, visible = true;
+  if ('IntersectionObserver' in window) new IntersectionObserver(function (en) { visible = en[0].isIntersecting; }).observe(canvas);
+
+  function frame(now) {
+    var dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+    if (visible && !document.hidden) {
+      acc += dt;
+      var n = 0;
+      while (acc >= STEP && n < 8) { step(STEP); acc -= STEP; n++; }
+      if (n === 8) acc = 0;
+      draw();
+      frames++;
+    }
+    if (now - fpsT > 500) {
+      var active = 0;
+      for (var s = 0; s < springs.length; s++) if (springs[s].on) active++;
+      sPoints.textContent = points.length;
+      sLinks.textContent = active;
+      sFps.textContent = Math.round(frames * 1000 / (now - fpsT));
+      frames = 0; fpsT = now;
+    }
+    requestAnimationFrame(frame);
+  }
+
+  build();
+  resize();
+  if ('ResizeObserver' in window) new ResizeObserver(resize).observe(canvas);
+  else window.addEventListener('resize', resize);
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

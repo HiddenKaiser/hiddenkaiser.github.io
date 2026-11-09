@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Projects | Jack Keuler</title>
+<meta name="description" content="Simulation and systems projects by Jack Keuler: an interactive cloth simulation, Gerstner-wave oceans, a 10,000-car traffic simulator, procedural glass fracture, inverse kinematics and voxel meshing.">
+<meta name="author" content="Jack Keuler">
+<link rel="canonical" href="https://jackkeuler.com/projects/">
+<meta name="theme-color" content="#F3F4F6">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://jackkeuler.com/projects/">
+<meta property="og:site_name" content="Jack Keuler">
+<meta property="og:title" content="Projects | Jack Keuler">
+<meta property="og:description" content="Simulations, procedural geometry and systems work, with an interactive cloth demo.">
+<meta property="og:image" content="https://jackkeuler.com/photo.jpg">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,300..800&family=Geist:wght@300..700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --paper: #F3F4F6; --surface: #FFFFFF; --ink: #0D1015; --muted: #5B6271; --line: #DCE0E7;
+  --accent: #FF4D12; --accent-deep: #C23A06; --accent-wash: #FFEDE5;
+  --display: "Bricolage Grotesque", "Arial Narrow", system-ui, sans-serif;
+  --body: "Geist", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --radius: 14px; --ease: cubic-bezier(.2, .8, .2, 1);
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--body); line-height: 1.55; -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+h1, h2, h3 { margin: 0; text-wrap: balance; font-family: var(--display); font-weight: 700; letter-spacing: -0.02em; line-height: 1.02; }
+p { margin: 0; }
+a { color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+.wrap { width: 100%; max-width: 1200px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 40px); }
+
+/* Nav (matches the portfolio) */
+.nav { position: sticky; top: 0; z-index: 50; background: color-mix(in srgb, var(--paper) 82%, transparent); backdrop-filter: saturate(1.4) blur(14px); -webkit-backdrop-filter: saturate(1.4) blur(14px); border-bottom: 1px solid var(--line); }
+.nav .wrap { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: 64px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 600; }
+.brand-mark { width: 32px; height: 32px; border-radius: 9px; background: var(--ink); color: var(--paper); display: grid; place-items: center; font-family: var(--display); font-weight: 800; font-size: 14px; letter-spacing: -0.04em; transition: transform .5s var(--ease), background .3s; }
+.brand:hover .brand-mark { transform: rotate(-8deg) scale(1.05); background: var(--accent); }
+.nav-links { display: flex; align-items: center; gap: 4px; }
+.nav-link { padding: 8px 12px; border-radius: 999px; color: var(--muted); font-size: 14px; text-decoration: none; transition: color .2s, background .2s; }
+.nav-link:hover, .nav-link[aria-current="page"] { color: var(--ink); background: var(--surface); }
+.nav-cta { display: inline-flex; align-items: center; gap: 8px; padding: 9px 16px; border-radius: 999px; background: var(--ink); color: var(--paper); text-decoration: none; font-size: 14px; font-weight: 500; transition: transform .25s var(--ease), background .25s; }
+.nav-cta:hover { background: var(--accent); transform: translateY(-1px); }
+@media (max-width: 520px) { .brand span:last-child { display: none; } }
+
+/* Header */
+.head { position: relative; padding: clamp(40px, 7vw, 88px) 0 clamp(28px, 4vw, 44px); isolation: isolate; }
+.head::before { content: ""; position: absolute; inset: 0; z-index: -1; background-image: radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--ink) 14%, transparent) 1px, transparent 0); background-size: 22px 22px; -webkit-mask-image: radial-gradient(ellipse 70% 70% at 70% 30%, #000 20%, transparent 75%); mask-image: radial-gradient(ellipse 70% 70% at 70% 30%, #000 20%, transparent 75%); }
+.tag-line { font-family: var(--mono); font-size: 13px; color: var(--muted); display: flex; gap: 10px; align-items: center; }
+.tag-line::before { content: ""; width: 18px; height: 2px; background: var(--accent); }
+.head h1 { margin-top: 16px; font-size: clamp(3rem, 9vw, 7rem); font-variation-settings: "wdth" 75, "opsz" 96; font-weight: 800; letter-spacing: -0.045em; line-height: .88; }
+.head h1 .dot { color: var(--accent); }
+.head p { margin-top: 18px; max-width: 58ch; color: var(--muted); font-size: 1.1rem; }
+
+/* Grid */
+.grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; padding-bottom: clamp(64px, 9vw, 112px); }
+.card { grid-column: span 4; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: clamp(20px, 2.4vw, 26px); display: flex; flex-direction: column; gap: 12px; transition: transform .45s var(--ease), box-shadow .45s var(--ease), border-color .3s; }
+.card:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--ink) 22%, var(--line)); box-shadow: 0 24px 48px -30px rgba(13,16,21,.35); }
+.meta { display: flex; flex-wrap: wrap; gap: 4px 12px; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.card h2 { font-size: 1.55rem; font-variation-settings: "wdth" 85; }
+.card p.desc { font-size: 15px; color: var(--muted); }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 4px; }
+.tag { font-family: var(--mono); font-size: 11.5px; padding: 4px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); background: var(--paper); }
+.foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 13.5px; }
+.foot a { font-weight: 500; text-decoration: none; display: inline-flex; gap: 6px; align-items: center; }
+.foot a:hover { color: var(--accent-deep); }
+.foot .private { font-family: var(--mono); font-size: 12px; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
+
+/* Featured: links to the live demo */
+.feature { grid-column: span 12; display: grid; grid-template-columns: 1fr 1.15fr; gap: clamp(20px, 3vw, 40px); background: var(--ink); color: var(--paper); border-color: var(--ink); padding: clamp(22px, 3vw, 36px); text-decoration: none; overflow: hidden; }
+.feature:hover { border-color: var(--ink); box-shadow: 0 30px 60px -30px rgba(13,16,21,.55); }
+.feature .meta, .feature p.desc { color: #9AA1AE; }
+.feature h2 { font-size: clamp(2rem, 4.4vw, 3.25rem); font-variation-settings: "wdth" 80; font-weight: 800; letter-spacing: -0.035em; }
+.feature .tag { background: transparent; border-color: #2A303A; color: #B7BDC8; }
+.feature .live { display: inline-flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 12px; color: var(--paper); background: color-mix(in srgb, var(--accent) 22%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent); padding: 4px 10px 4px 8px; border-radius: 999px; width: max-content; }
+.live i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.feature .cta { margin-top: auto; display: inline-flex; align-items: center; gap: 10px; padding: 12px 18px; border-radius: 999px; background: var(--paper); color: var(--ink); font-weight: 500; font-size: 15px; width: max-content; transition: background .25s, color .25s, transform .25s var(--ease); }
+.feature:hover .cta { background: var(--accent); color: #fff; transform: translateX(3px); }
+.feature-text { display: flex; flex-direction: column; gap: 14px; }
+.preview { position: relative; border: 1px solid #2A303A; border-radius: 12px; background: #11151B; min-height: 240px; overflow: hidden; }
+.preview canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+@media (max-width: 960px) { .card { grid-column: span 6; } .feature { grid-template-columns: 1fr; } .preview { min-height: 220px; } }
+@media (max-width: 640px) { .card { grid-column: span 12; } }
+
+footer { border-top: 1px solid var(--line); padding: 28px 0 40px; color: var(--muted); font-size: 13px; }
+footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
+footer a { text-decoration: none; }
+footer a:hover { color: var(--ink); }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: .001ms !important; } }
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="/" aria-label="Jack Keuler, portfolio home">
+      <span class="brand-mark">JK</span>
+      <span>Jack Keuler</span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a class="nav-link" href="/">Portfolio</a>
+      <a class="nav-link" href="/projects/" aria-current="page">Projects</a>
+      <a class="nav-cta" href="/#resume">Resume</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="head">
+    <div class="wrap">
+      <span class="tag-line">Side projects</span>
+      <h1>Projects<span class="dot">.</span></h1>
+      <p>Simulations, procedural geometry and performance work I've built on my own time, mostly in Luau where every millisecond of a 60 fps frame budget counts.</p>
+    </div>
+  </section>
+
+  <div class="wrap">
+    <div class="grid">
+
+      <a class="card feature" href="/projects/cloth/">
+        <div class="feature-text">
+          <span class="live"><i aria-hidden="true"></i>Interactive demo</span>
+          <div class="meta"><span>2025</span><span>Luau → JavaScript</span></div>
+          <h2>Cloth simulation</h2>
+          <p class="desc">A mass-spring cloth solved with Verlet integration and distance constraints. The original runs in Roblox on an EditableMesh with sphere and cylinder colliders. This web port lets you grab, throw, tear and re-pin it.</p>
+          <div class="tags"><span class="tag">Verlet integration</span><span class="tag">Constraint solving</span><span class="tag">Luau</span><span class="tag">Canvas</span></div>
+          <span class="cta">Open the simulation
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </span>
+        </div>
+        <div class="preview" aria-hidden="true"><canvas id="preview"></canvas></div>
+      </a>
+
+      <article class="card">
+        <div class="meta"><span>2024–2025</span><span>Luau</span></div>
+        <h2>Dynamic ocean</h2>
+        <p class="desc">Real-time ocean surface built from summed Gerstner waves on an EditableMesh, with level of detail, analytic normals from wave derivatives, and a benchmarking harness to keep it inside the frame budget.</p>
+        <div class="tags"><span class="tag">Gerstner waves</span><span class="tag">LOD</span><span class="tag">Native Luau</span></div>
+        <div class="foot"><span class="private">Private repository</span></div>
+      </article>
+
+      <article class="card">
+        <div class="meta"><span>2023–2024</span><span>Lua</span></div>
+        <h2>Traffic simulation</h2>
+        <p class="desc">Simulates and visualizes up to 10,000 cars at 60 fps. Lanes are circular queues, merges use a modified binary search, and drivers react to the car ahead with a modeled human reaction delay.</p>
+        <div class="tags"><span class="tag">Binary search</span><span class="tag">Circular queues</span><span class="tag">10K agents</span></div>
+        <div class="foot"><a href="https://github.com/HiddenKaiser/trafficsim" target="_blank" rel="noopener">View on GitHub ↗</a></div>
+      </article>
+
+      <article class="card">
+        <div class="meta"><span>2025</span><span>Luau</span></div>
+        <h2>Procedural glass shatter</h2>
+        <p class="desc">Breaks any polygonal pane into shards around the impact point using concentric fracture rings and radial cracks, then triangulates each shard with ear clipping into its own EditableMesh.</p>
+        <div class="tags"><span class="tag">Computational geometry</span><span class="tag">Ear clipping</span><span class="tag">EditableMesh</span></div>
+        <div class="foot"><span class="private">Private repository</span></div>
+      </article>
+
+      <article class="card">
+        <div class="meta"><span>2024</span><span>Luau</span></div>
+        <h2>Procedural spider IK</h2>
+        <p class="desc">A FABRIK inverse-kinematics solver driving a multi-legged spider. Each leg raycasts for footholds and steps when it drifts too far, so the gait emerges from the terrain rather than animations.</p>
+        <div class="tags"><span class="tag">FABRIK</span><span class="tag">Procedural animation</span><span class="tag">Raycasting</span></div>
+        <div class="foot"><span class="private">Private repository</span></div>
+      </article>
+
+      <article class="card">
+        <div class="meta"><span>2024</span><span>Luau · C#</span></div>
+        <h2>Voxel terrain mesher</h2>
+        <p class="desc">Chunked voxel terrain from layered Perlin noise, merged into large faces with greedy meshing, with a custom bit buffer for compact chunk data. Ported from a C# reference implementation.</p>
+        <div class="tags"><span class="tag">Greedy meshing</span><span class="tag">Perlin noise</span><span class="tag">Bit packing</span></div>
+        <div class="foot"><span class="private">Private repository</span></div>
+      </article>
+
+      <article class="card">
+        <div class="meta"><span>2025</span><span>Racket</span></div>
+        <h2>Church encoder</h2>
+        <p class="desc">A compiler from a large subset of Scheme down to the pure λ-calculus: numbers, booleans, lists and let-forms all become nothing but single-argument functions.</p>
+        <div class="tags"><span class="tag">Compilers</span><span class="tag">λ-calculus</span><span class="tag">Scheme</span></div>
+        <div class="foot"><span class="private">Coursework, Syracuse University</span></div>
+      </article>
+
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© 2026 Jack Keuler</span>
+    <a href="/">Back to the portfolio</a>
+  </div>
+</footer>
+
+<script>
+/* Decorative preview: a pinned, gently swaying grid of lines (the real physics lives on the demo page). */
+(function () {
+  var cv = document.getElementById('preview');
+  if (!cv || !cv.getContext) return;
+  var ctx = cv.getContext('2d');
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var COLS = 19, ROWS = 12, w = 0, h = 0, dpr = 1;
+  function size() {
+    var r = cv.getBoundingClientRect();
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    w = r.width; h = r.height;
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  }
+  function pinned(c) { return c <= 1 || c >= COLS - 2 || c === (COLS - 1) / 2; }
+  function draw(t) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    var sp = Math.min((w * 0.78) / (COLS - 1), (h * 0.8) / (ROWS - 1));
+    var x0 = (w - sp * (COLS - 1)) / 2, y0 = h * 0.1;
+    var pts = [];
+    for (var r = 0; r < ROWS; r++) {
+      var row = [];
+      for (var c = 0; c < COLS; c++) {
+        var k = r / (ROWS - 1);
+        var sagTop = (r === 0 && !pinned(c)) ? Math.sin(Math.PI * ((c - 1) % 8) / 8) * sp * 0.35 : 0;
+        var sway = Math.sin(t * 1.1 + r * 0.32 + c * 0.12) * sp * 0.55 * k * k;
+        var bunch = Math.sin(c / (COLS - 1) * Math.PI * 4) * sp * 0.18 * k;
+        row.push([x0 + c * sp + sway + bunch, y0 + r * sp * 0.97 + sagTop + Math.abs(sway) * 0.25]);
+      }
+      pts.push(row);
+    }
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(243,244,246,0.55)';
+    ctx.beginPath();
+    for (r = 0; r < ROWS; r++) for (c = 0; c < COLS; c++) {
+      var p = pts[r][c];
+      if (c < COLS - 1) { ctx.moveTo(p[0], p[1]); ctx.lineTo(pts[r][c + 1][0], pts[r][c + 1][1]); }
+      if (r < ROWS - 1) { ctx.moveTo(p[0], p[1]); ctx.lineTo(pts[r + 1][c][0], pts[r + 1][c][1]); }
+    }
+    ctx.stroke();
+    ctx.fillStyle = '#FF4D12';
+    for (c = 0; c < COLS; c++) if (pinned(c)) { ctx.beginPath(); ctx.arc(pts[0][c][0], pts[0][c][1], 3, 0, Math.PI * 2); ctx.fill(); }
+  }
+  size(); draw(0);
+  if ('ResizeObserver' in window) new ResizeObserver(function () { size(); draw(performance.now() / 1000); }).observe(cv);
+  if (reduce) return;
+  var visible = true;
+  if ('IntersectionObserver' in window) new IntersectionObserver(function (e) { visible = e[0].isIntersecting; }).observe(cv);
+  (function loop(now) { if (visible) draw(now / 1000); requestAnimationFrame(loop); })(performance.now());
+})();
+</script>
+</body>
+</html>
