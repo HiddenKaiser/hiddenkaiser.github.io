@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Page not found | Jack Keuler</title>
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#F3F4F6">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,300..800&family=Geist:wght@300..700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --paper: #F3F4F6; --surface: #FFFFFF; --ink: #0D1015; --muted: #5B6271; --line: #DCE0E7;
+  --accent: #FF4D12; --accent-wash: #FFEDE5;
+  --display: "Bricolage Grotesque", "Arial Narrow", system-ui, sans-serif;
+  --body: "Geist", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --ease: cubic-bezier(.2, .8, .2, 1);
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink); font-family: var(--body);
+  line-height: 1.55; -webkit-font-smoothing: antialiased;
+  display: flex; flex-direction: column; overflow-x: hidden;
+}
+a { color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+.wrap { width: 100%; max-width: 1200px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 40px); }
+
+.nav .wrap { display: flex; align-items: center; height: 64px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 600; }
+.brand-mark {
+  width: 32px; height: 32px; border-radius: 9px; background: var(--ink); color: var(--paper);
+  display: grid; place-items: center; font-family: var(--display); font-weight: 800; font-size: 14px; letter-spacing: -0.04em;
+  transition: transform .5s var(--ease), background .3s;
+}
+.brand:hover .brand-mark { transform: rotate(-8deg) scale(1.05); background: var(--accent); }
+
+main { flex: 1; position: relative; display: flex; align-items: center; isolation: isolate; padding: 32px 0 64px; }
+main::before {
+  content: ""; position: absolute; inset: 0; z-index: -1;
+  background-image: radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--ink) 14%, transparent) 1px, transparent 0);
+  background-size: 22px 22px;
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 60% 40%, #000 20%, transparent 75%);
+          mask-image: radial-gradient(ellipse 70% 60% at 60% 40%, #000 20%, transparent 75%);
+}
+.eyebrow {
+  display: inline-flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 13px;
+  color: var(--muted); padding: 6px 12px 6px 8px; border: 1px solid var(--line); background: var(--surface); border-radius: 999px;
+}
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; }
+.code {
+  margin: 22px 0 0; font-family: var(--display); font-variation-settings: "wdth" 75, "opsz" 96;
+  font-size: clamp(6rem, 26vw, 16rem); font-weight: 800; letter-spacing: -0.05em; line-height: .82;
+  overflow: hidden; padding-bottom: .04em;
+}
+.code span { display: inline-block; animation: rise 1s var(--ease) both; }
+.code .accent { color: var(--accent); }
+@keyframes rise { from { transform: translateY(105%); } to { transform: none; } }
+h1 { margin: 24px 0 0; font-family: var(--display); font-variation-settings: "wdth" 85; font-size: clamp(1.75rem, 4vw, 2.75rem); font-weight: 700; letter-spacing: -0.02em; line-height: 1.05; }
+p.lede { margin: 12px 0 0; color: var(--muted); max-width: 46ch; font-size: 1.1rem; }
+.path { font-family: var(--mono); font-size: .95em; color: var(--ink); background: var(--accent-wash); padding: 1px 6px; border-radius: 6px; overflow-wrap: anywhere; }
+.actions { margin-top: 28px; display: flex; flex-wrap: wrap; gap: 12px; }
+.btn {
+  display: inline-flex; align-items: center; gap: 10px; padding: 13px 20px; border-radius: 999px;
+  font-weight: 500; text-decoration: none; border: 1px solid var(--ink); font-size: 15px;
+  transition: transform .25s var(--ease), background .25s, border-color .25s, box-shadow .25s;
+}
+.btn-primary { background: var(--ink); color: var(--paper); }
+.btn-primary:hover { background: var(--accent); border-color: var(--accent); transform: translateY(-2px); box-shadow: 0 10px 24px -10px var(--accent); }
+.btn-ghost { background: transparent; border-color: var(--line); }
+.btn-ghost:hover { border-color: var(--ink); background: var(--surface); transform: translateY(-2px); }
+footer { padding: 28px 0 36px; color: var(--muted); font-size: 13px; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; } }
+</style>
+</head>
+<body>
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="/" aria-label="Jack Keuler, portfolio home">
+      <span class="brand-mark">JK</span>
+      <span>Jack Keuler</span>
+    </a>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <span class="eyebrow"><span class="dot" aria-hidden="true"></span>HTTP 404 · not found</span>
+    <p class="code" aria-hidden="true"><span>404<span class="accent">.</span></span></p>
+    <h1>This page didn't make it to production.</h1>
+    <p class="lede">There's nothing at <span class="path" id="path">this address</span>. It may have moved, or the link has a typo.</p>
+    <div class="actions">
+      <a class="btn btn-primary" href="/">Back to the portfolio
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </a>
+      <a class="btn btn-ghost" href="/#resume">Read the resume</a>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">© 2026 Jack Keuler</div>
+</footer>
+<script>
+  try { var p = decodeURIComponent(location.pathname); if (p && p !== '/') document.getElementById('path').textContent = p; } catch (e) {}
+</script>
+</body>
+</html>
