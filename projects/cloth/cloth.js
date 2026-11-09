@@ -1,0 +1,857 @@
+/* Cloth simulation demo (jackkeuler.com/projects/cloth/): 3D Verlet cloth with structural, shear and bend
+   springs, point self-collision, and WebGL shading with the spring network drawn on top.
+   Loaded at the end of projects/cloth/index.html, after the elements it uses. */
+(function () {
+  'use strict';
+
+  /* PHYSICS-START ======================================================================
+     Pure simulation: flat typed arrays, no DOM. World units; y points down, the viewer is at -z. */
+  var COLS = 33, ROWS = 21, SPACING = 19;
+  var GRAVITY = 1500;            // world units / s^2
+  var DAMPING = 0.985;           // fraction of velocity kept per step
+  var ITERATIONS = 8;            // constraint passes per step (more passes = less stretch)
+  var STEP = 1 / 120;            // fixed physics timestep
+  var TEAR_RATIO = 3;            // a structural spring snaps beyond this multiple of its rest length
+  var BEND_STIFFNESS = 0.2;      // fraction of the bend correction applied per pass
+  var SELF_DIST = 15;            // self-collision: closest two non-neighbouring points may get (cloth thickness)
+  var SELF_REACH = 22;           // radius candidate pairs are gathered within (thickness + margin for one step of motion)
+  var SELF_CELL = 2 * SELF_REACH; // hash cells twice the reach: each point then only checks 8 cells, not 27
+  var HASH_SIZE = 4096;          // spatial hash buckets (power of two)
+  var MAX_STEP = 12;             // no point moves further than this in one step, so nothing tunnels through
+  var MAX_GRAB_SPEED = 1440;     // world units / s a held point can travel (= MAX_STEP per 1/120 s step)
+  var GRAB_RADIUS = 48;          // grabbing also pulls the cloth within this radius, fading out toward the edge
+  var GRAB_PULL = 0.5;           // pull strength at the centre of that patch (applied after every solver pass)
+  var TOP = 70, FLOOR = 560;
+
+  var N = COLS * ROWS;
+  var HE = ROWS * (COLS - 1), VE = (ROWS - 1) * COLS, NE = HE + VE;   // structural edges
+  var NC = (ROWS - 1) * (COLS - 1);                                  // grid cells
+  var MAX_SPRINGS = NE + 2 * NC + ROWS * (COLS - 2) + (ROWS - 2) * COLS;
+  var KIND_STRUCT = 0, KIND_SHEAR = 1, KIND_BEND = 2;
+
+  var X = new Float64Array(N), Y = new Float64Array(N), Z = new Float64Array(N);
+  var PX = new Float64Array(N), PY = new Float64Array(N), PZ = new Float64Array(N);
+  var INV = new Float64Array(N);                 // inverse mass: 0 = pinned or held
+  var PIN = new Uint8Array(N);
+  var SA = new Int32Array(MAX_SPRINGS), SB = new Int32Array(MAX_SPRINGS);
+  var RR = new Float64Array(MAX_SPRINGS);        // rest length squared
+  var KIND = new Uint8Array(MAX_SPRINGS);
+  var REF1 = new Int32Array(MAX_SPRINGS), REF2 = new Int32Array(MAX_SPRINGS);  // edge / cell ids
+  var EDGE = new Uint8Array(NE);                 // 1 while a structural edge is intact
+  var M = 0;                                     // live springs, dense in [0, M)
+  var topology = 0;                              // bumps whenever the mesh changes
+  var wind = false, tearing = false, grabbed = -1, simTime = 0;
+  var target = { x: 0, y: 0, z: 0 };             // where the held point is being pulled
+  // the soft patch around the held point: which points, how strongly, and their offsets at grab time
+  var GI = new Int32Array(N), GW = new Float64Array(N), GOX = new Float64Array(N), GOY = new Float64Array(N), GOZ = new Float64Array(N), grabCount = 0;
+  // Pull the patch toward "held point + its offset at grab time", strongest near the centre. Applied after
+  // every solver pass so it holds against the springs: the grip is a hand-sized area, not a pinched point.
+  function pullGrabArea() {
+    if (grabbed < 0) return;
+    var g = grabbed;
+    for (var gk = 0; gk < grabCount; gk++) {
+      var j = GI[gk], w = GW[gk];
+      if (INV[j] === 0) continue;
+      X[j] += (X[g] + GOX[gk] - X[j]) * w; Y[j] += (Y[g] + GOY[gk] - Y[j]) * w; Z[j] += (Z[g] + GOZ[gk] - Z[j]) * w;
+    }
+  }
+  function grabArea(g) {
+    grabCount = 0;
+    for (var j = 0; j < N; j++) {
+      if (j === g || INV[j] === 0) continue;
+      var ox = X[j] - X[g], oy = Y[j] - Y[g], oz = Z[j] - Z[g], d = Math.sqrt(ox * ox + oy * oy + oz * oz);
+      if (d >= GRAB_RADIUS) continue;
+      var f = 1 - d / GRAB_RADIUS;
+      GI[grabCount] = j; GW[grabCount] = GRAB_PULL * f; GOX[grabCount] = ox; GOY[grabCount] = oy; GOZ[grabCount] = oz; grabCount++;
+    }
+  }
+  var tears = [];
+  var selfCollide = true;
+
+  // self-collision scratch space, allocated once
+  var ROWI = new Int16Array(N), COLI = new Int16Array(N);
+  for (var gi = 0; gi < N; gi++) { ROWI[gi] = (gi / COLS) | 0; COLI[gi] = gi % COLS; }
+  var cellStart = new Int32Array(HASH_SIZE + 1), cellItems = new Int32Array(N), pointCell = new Int32Array(N);
+  var MAX_PAIRS = N * 16, PAIR_A = new Int32Array(MAX_PAIRS), PAIR_B = new Int32Array(MAX_PAIRS), pairCount = 0;
+
+  function hEdge(r, c) { return r * (COLS - 1) + c; }
+  function vEdge(r, c) { return HE + r * COLS + c; }
+  function cellId(r, c) { return r * (COLS - 1) + c; }
+  function isPinnedColumn(c) {
+    // two points at each top corner plus the middle
+    return c <= 1 || c >= COLS - 2 || c === Math.floor(COLS / 2);
+  }
+  function addSpring(a, b, kind, r1, r2) {
+    var dx = X[b] - X[a], dy = Y[b] - Y[a], dz = Z[b] - Z[a];
+    SA[M] = a; SB[M] = b; KIND[M] = kind; REF1[M] = r1; REF2[M] = r2;
+    RR[M] = dx * dx + dy * dy + dz * dz;
+    M++;
+  }
+
+  function build() {
+    // the cloth starts flat and horizontal, pinned along its back edge, then falls and drapes
+    var x0 = (1000 - (COLS - 1) * SPACING) / 2, r, c, i;
+    for (r = 0; r < ROWS; r++) {
+      for (c = 0; c < COLS; c++) {
+        i = r * COLS + c;
+        X[i] = PX[i] = x0 + c * SPACING;
+        Y[i] = PY[i] = TOP;
+        Z[i] = PZ[i] = r * SPACING;
+        PIN[i] = (r === 0 && isPinnedColumn(c)) ? 1 : 0;
+        INV[i] = PIN[i] ? 0 : 1;
+      }
+    }
+    M = 0; EDGE.fill(1);
+    for (r = 0; r < ROWS; r++) for (c = 0; c < COLS; c++) {
+      i = r * COLS + c;
+      if (c < COLS - 1) addSpring(i, i + 1, KIND_STRUCT, hEdge(r, c), -1);
+      if (r < ROWS - 1) addSpring(i, i + COLS, KIND_STRUCT, vEdge(r, c), -1);
+    }
+    for (r = 0; r < ROWS - 1; r++) for (c = 0; c < COLS - 1; c++) {
+      i = r * COLS + c;
+      addSpring(i, i + COLS + 1, KIND_SHEAR, cellId(r, c), -1);
+      addSpring(i + 1, i + COLS, KIND_SHEAR, cellId(r, c), -1);
+    }
+    for (r = 0; r < ROWS; r++) for (c = 0; c < COLS; c++) {
+      i = r * COLS + c;
+      if (c < COLS - 2) addSpring(i, i + 2, KIND_BEND, hEdge(r, c), hEdge(r, c + 1));
+      if (r < ROWS - 2) addSpring(i, i + 2 * COLS, KIND_BEND, vEdge(r, c), vEdge(r + 1, c));
+    }
+    grabbed = -1; grabCount = 0; tears.length = 0; topology++;
+  }
+
+  function removeSpring(s) {   // swap-remove keeps [0, M) dense
+    M--;
+    SA[s] = SA[M]; SB[s] = SB[M]; RR[s] = RR[M]; KIND[s] = KIND[M]; REF1[s] = REF1[M]; REF2[s] = REF2[M];
+  }
+
+  // Breaking a structural edge also drops the shear springs of the cells beside it and the
+  // bend springs spanning it, so the fabric really separates instead of hanging on hidden springs.
+  function breakEdge(e) {
+    if (!EDGE[e]) return;
+    EDGE[e] = 0; topology++;
+    var c1 = -1, c2 = -1, r, c, k;
+    if (e < HE) { r = (e / (COLS - 1)) | 0; c = e % (COLS - 1); if (r > 0) c1 = cellId(r - 1, c); if (r < ROWS - 1) c2 = cellId(r, c); }
+    else { k = e - HE; r = (k / COLS) | 0; c = k % COLS; if (c > 0) c1 = cellId(r, c - 1); if (c < COLS - 1) c2 = cellId(r, c); }
+    for (var s = M - 1; s >= 0; s--) {
+      var kd = KIND[s];
+      if ((kd === KIND_STRUCT && REF1[s] === e) ||
+          (kd === KIND_SHEAR && (REF1[s] === c1 || REF1[s] === c2)) ||
+          (kd === KIND_BEND && (REF1[s] === e || REF2[s] === e))) removeSpring(s);
+    }
+  }
+
+  // Move both ends of a spring toward its rest length, split by inverse mass.
+  // Square-root-free (Jakobsen): (d - L) / d  ~  (d^2 - L^2) / (d^2 + L^2).
+  // Structural and shear springs only resist stretching; bend springs push and pull, softly.
+  function relax(s) {
+    var a = SA[s], b = SB[s];
+    var dx = X[b] - X[a], dy = Y[b] - Y[a], dz = Z[b] - Z[a];
+    var d2 = dx * dx + dy * dy + dz * dz, r2 = RR[s], kd = KIND[s];
+    if (kd !== KIND_BEND && d2 <= r2) return;
+    var wa = INV[a], wb = INV[b], w = wa + wb;
+    if (w === 0) return;
+    var k = (d2 - r2) / ((d2 + r2) * w);
+    if (kd === KIND_BEND) k *= BEND_STIFFNESS;
+    var ox = dx * k, oy = dy * k, oz = dz * k;
+    X[a] += ox * wa; Y[a] += oy * wa; Z[a] += oz * wa;
+    X[b] -= ox * wb; Y[b] -= oy * wb; Z[b] -= oz * wb;
+  }
+
+  /* ---------- Self-collision: points as small spheres, found with a spatial hash ---------- */
+  function hashCell(ix, iy, iz) {
+    return (Math.imul(ix, 92837111) ^ Math.imul(iy, 689287499) ^ Math.imul(iz, 283923481)) & (HASH_SIZE - 1);
+  }
+  // Bin every point into a hash grid (counting sort, no allocation), then collect the pairs that are
+  // close in space but not close on the cloth. Neighbours within two grid steps are skipped: they are
+  // already held apart by the springs, and colliding them would fight the bend springs.
+  function gatherPairs() {
+    var inv = 1 / SELF_CELL, i, k, hh, q2 = SELF_REACH * SELF_REACH;
+    cellStart.fill(0);
+    for (i = 0; i < N; i++) {
+      hh = hashCell(Math.floor(X[i] * inv), Math.floor(Y[i] * inv), Math.floor(Z[i] * inv));
+      pointCell[i] = hh; cellStart[hh]++;
+    }
+    for (hh = 1; hh <= HASH_SIZE; hh++) cellStart[hh] += cellStart[hh - 1];
+    for (i = 0; i < N; i++) cellItems[--cellStart[pointCell[i]]] = i;
+    pairCount = 0;
+    for (i = 0; i < N; i++) {
+      var fx = X[i] * inv, fy = Y[i] * inv, fz = Z[i] * inv, ix = Math.floor(fx), iy = Math.floor(fy), iz = Math.floor(fz);
+      // anything within SELF_REACH lies in this cell or the neighbour on the nearer side, per axis
+      var sx = fx - ix < 0.5 ? -1 : 1, sy = fy - iy < 0.5 ? -1 : 1, sz = fz - iz < 0.5 ? -1 : 1, ri = ROWI[i], ci = COLI[i];
+      for (var ox = 0; ox < 2; ox++) for (var oy = 0; oy < 2; oy++) for (var oz = 0; oz < 2; oz++) {
+        hh = hashCell(ix + ox * sx, iy + oy * sy, iz + oz * sz);
+        for (k = cellStart[hh]; k < cellStart[hh + 1]; k++) {
+          var j = cellItems[k];
+          if (j <= i) continue;
+          var dr = ROWI[j] - ri, dc = COLI[j] - ci;
+          if (dr <= 2 && dr >= -2 && dc <= 2 && dc >= -2) continue;
+          var ex = X[j] - X[i], ey = Y[j] - Y[i], ez = Z[j] - Z[i];
+          if (ex * ex + ey * ey + ez * ez < q2 && pairCount < MAX_PAIRS) { PAIR_A[pairCount] = i; PAIR_B[pairCount] = j; pairCount++; }
+        }
+      }
+    }
+  }
+  // Push overlapping pairs apart to SELF_DIST, split by inverse mass. (No friction term: editing the
+  // previous positions for friction kept resting layers creeping forever, so the solver never slept.)
+  function resolvePairs() {
+    var m2 = SELF_DIST * SELF_DIST;
+    for (var p = 0; p < pairCount; p++) {
+      var a = PAIR_A[p], b = PAIR_B[p];
+      var dx = X[b] - X[a], dy = Y[b] - Y[a], dz = Z[b] - Z[a], d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 >= m2 || d2 < 1e-8) continue;
+      var wa = INV[a], wb = INV[b], w = wa + wb;
+      if (w === 0) continue;
+      var d = Math.sqrt(d2), k = (SELF_DIST - d) / (d * w);
+      X[a] -= dx * k * wa; Y[a] -= dy * k * wa; Z[a] -= dz * k * wa;
+      X[b] += dx * k * wb; Y[b] += dy * k * wb; Z[b] += dz * k * wb;
+    }
+  }
+
+  // One fixed physics step. Returns the largest distance any point moved (for sleeping).
+  function step(dt) {
+    simTime += dt;
+    var dt2 = dt * dt, gy = GRAVITY * dt2, i, s, x, y, z, it;
+
+    // 1. Verlet integration
+    var gust = 0, t3 = simTime * 3.1;
+    if (wind) gust = (520 + Math.sin(simTime * 0.9) * 300 + Math.sin(simTime * 2.3 + 1.7) * 160) * dt2;
+    for (i = 0; i < N; i++) {
+      if (INV[i] === 0) continue;
+      x = X[i]; y = Y[i]; z = Z[i];
+      var nx = x + (x - PX[i]) * DAMPING, ny = y + (y - PY[i]) * DAMPING + gy, nz = z + (z - PZ[i]) * DAMPING;
+      if (wind) {
+        var rip = gust * (0.55 + 0.45 * Math.sin(t3 + y * 0.021 + x * 0.004));
+        nx += rip * 0.35; ny -= rip * 0.12; nz -= rip;        // blows toward the viewer and to the right
+      }
+      var mx = nx - x, my = ny - y, mz = nz - z, m2 = mx * mx + my * my + mz * mz;
+      if (m2 > MAX_STEP * MAX_STEP) { var ms = MAX_STEP / Math.sqrt(m2); nx = x + mx * ms; ny = y + my * ms; nz = z + mz * ms; }
+      PX[i] = x; PY[i] = y; PZ[i] = z; X[i] = nx; Y[i] = ny; Z[i] = nz;
+    }
+
+    // 2. The held point chases the drag target at a capped speed
+    if (grabbed >= 0) {
+      var g = grabbed, gx = target.x - X[g], gyy = target.y - Y[g], gz = target.z - Z[g];
+      var gd2 = gx * gx + gyy * gyy + gz * gz, maxMove = MAX_GRAB_SPEED * dt;
+      PX[g] = X[g]; PY[g] = Y[g]; PZ[g] = Z[g];
+      if (gd2 > maxMove * maxMove) { var f = maxMove / Math.sqrt(gd2); gx *= f; gyy *= f; gz *= f; }
+      X[g] += gx; Y[g] += gyy; Z[g] += gz;
+      pullGrabArea();
+    }
+
+    // 3. Self-collision: gather nearby pairs every step, then resolve them between constraint passes
+    if (selfCollide) gatherPairs();
+
+    // 4. Constraints. The first pass also finds over-stretched structural springs to tear;
+    //    later passes alternate direction (symmetric Gauss-Seidel converges faster).
+    var tearLimit = TEAR_RATIO * TEAR_RATIO;
+    for (s = 0; s < M; s++) {
+      if (tearing && KIND[s] === KIND_STRUCT) {
+        var a = SA[s], b = SB[s], dx = X[b] - X[a], dy = Y[b] - Y[a], dz = Z[b] - Z[a];
+        if (dx * dx + dy * dy + dz * dz > RR[s] * tearLimit) { tears.push(REF1[s]); continue; }
+      }
+      relax(s);
+    }
+    if (tears.length) { for (i = 0; i < tears.length; i++) breakEdge(tears[i]); tears.length = 0; }
+    if (selfCollide) resolvePairs();
+    for (it = 1; it < ITERATIONS; it++) {
+      if (it & 1) { for (s = M - 1; s >= 0; s--) relax(s); }
+      else { for (s = 0; s < M; s++) relax(s); }
+      if (selfCollide && it === (ITERATIONS >> 1)) resolvePairs();
+      if (grabCount) pullGrabArea();
+    }
+    if (selfCollide) resolvePairs();
+
+    // 5. Floor with friction, soft walls, and motion for the sleep check
+    var maxMotion = 0;
+    for (i = 0; i < N; i++) {
+      if (X[i] < -300) X[i] = -300; else if (X[i] > 1300) X[i] = 1300;
+      if (Z[i] < -450) Z[i] = -450; else if (Z[i] > 850) Z[i] = 850;
+      if (Y[i] > FLOOR) {
+        Y[i] = FLOOR; PY[i] = FLOOR;
+        PX[i] = X[i] - (X[i] - PX[i]) * 0.6; PZ[i] = Z[i] - (Z[i] - PZ[i]) * 0.6;
+      }
+      var m = Math.abs(X[i] - PX[i]) + Math.abs(Y[i] - PY[i]) + Math.abs(Z[i] - PZ[i]);
+      if (m > maxMotion) maxMotion = m;
+    }
+    return maxMotion;
+  }
+  /* PHYSICS-END ======================================================================== */
+
+  var GRAB_RADIUS_PX = 30;       // pointer pick radius in CSS pixels
+  var SLEEP_FRAMES = 60;         // frames of near-stillness before the solver idles
+  var SLEEP_MOTION = 0.05;       // max per-step movement (world units) that counts as still
+
+  var canvas = document.getElementById('cloth');
+  var overlay = document.getElementById('overlay');
+  var octx = overlay.getContext('2d');
+  var gl = canvas.getContext('webgl', { antialias: true, alpha: true, premultipliedAlpha: false, stencil: true });
+  if (!gl) { document.getElementById('nogl').hidden = false; return; }
+
+  var mode = 'grab', showSurface = true, showSprings = true, showHidden = false;
+  var hover = -1, cssW = 1, cssH = 1, dpr = 1;
+  var pointer = { x: 0, y: 0, vx: 0, vy: 0, vz: 0, t: 0, down: false, cutting: false, orbiting: false, inside: false, wx: 0, wy: 0, wz: 0 };
+  var still = 0, asleep = false, dirty = true;
+  function wake() { asleep = false; still = 0; dirty = true; }
+
+  /* ---------- Camera: small matrix helpers (column-major, like WebGL) ---------- */
+  // head-on, slightly raised, with a long lens: reads as 2.5D, and you can still orbit
+  var CAM_HOME = { yaw: 0, pitch: 0.07 };
+  var cam = { yaw: CAM_HOME.yaw, pitch: CAM_HOME.pitch, dist: 1750, fov: 19 * Math.PI / 180, tx: 500, ty: 280, tz: 40 };
+  function homeCamera() { cam.yaw = CAM_HOME.yaw; cam.pitch = CAM_HOME.pitch; updateCamera(); dirty = true; }
+  var VP = new Float32Array(16), IVP = new Float32Array(16), EYE = [0, 0, 0], FWD = [0, 0, 1];
+
+  function mul(a, b, out) {
+    for (var c = 0; c < 4; c++) for (var r = 0; r < 4; r++)
+      out[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+    return out;
+  }
+  function invert(m, out) {
+    var a00 = m[0], a01 = m[1], a02 = m[2], a03 = m[3], a10 = m[4], a11 = m[5], a12 = m[6], a13 = m[7];
+    var a20 = m[8], a21 = m[9], a22 = m[10], a23 = m[11], a30 = m[12], a31 = m[13], a32 = m[14], a33 = m[15];
+    var b00 = a00 * a11 - a01 * a10, b01 = a00 * a12 - a02 * a10, b02 = a00 * a13 - a03 * a10, b03 = a01 * a12 - a02 * a11;
+    var b04 = a01 * a13 - a03 * a11, b05 = a02 * a13 - a03 * a12, b06 = a20 * a31 - a21 * a30, b07 = a20 * a32 - a22 * a30;
+    var b08 = a20 * a33 - a23 * a30, b09 = a21 * a32 - a22 * a31, b10 = a21 * a33 - a23 * a31, b11 = a22 * a33 - a23 * a32;
+    var det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+    if (!det) return out;
+    det = 1 / det;
+    out[0] = (a11 * b11 - a12 * b10 + a13 * b09) * det; out[1] = (a02 * b10 - a01 * b11 - a03 * b09) * det;
+    out[2] = (a31 * b05 - a32 * b04 + a33 * b03) * det; out[3] = (a22 * b04 - a21 * b05 - a23 * b03) * det;
+    out[4] = (a12 * b08 - a10 * b11 - a13 * b07) * det; out[5] = (a00 * b11 - a02 * b08 + a03 * b07) * det;
+    out[6] = (a32 * b02 - a30 * b05 - a33 * b01) * det; out[7] = (a20 * b05 - a22 * b02 + a23 * b01) * det;
+    out[8] = (a10 * b10 - a11 * b08 + a13 * b06) * det; out[9] = (a01 * b08 - a00 * b10 - a03 * b06) * det;
+    out[10] = (a30 * b04 - a31 * b02 + a33 * b00) * det; out[11] = (a21 * b02 - a20 * b04 - a23 * b00) * det;
+    out[12] = (a11 * b07 - a10 * b09 - a12 * b06) * det; out[13] = (a00 * b09 - a01 * b07 + a02 * b06) * det;
+    out[14] = (a31 * b01 - a30 * b03 - a32 * b00) * det; out[15] = (a20 * b03 - a21 * b01 + a22 * b00) * det;
+    return out;
+  }
+  function updateCamera() {
+    var cp = Math.cos(cam.pitch);
+    EYE[0] = cam.tx + cam.dist * Math.sin(cam.yaw) * cp;
+    EYE[1] = cam.ty - cam.dist * Math.sin(cam.pitch);          // y is down, so "above" is negative y
+    EYE[2] = cam.tz - cam.dist * Math.cos(cam.yaw) * cp;       // the viewer sits on the -z side
+    // look-at basis with "up" = -y
+    var zx = EYE[0] - cam.tx, zy = EYE[1] - cam.ty, zz = EYE[2] - cam.tz, zl = Math.hypot(zx, zy, zz);
+    zx /= zl; zy /= zl; zz /= zl;
+    FWD[0] = -zx; FWD[1] = -zy; FWD[2] = -zz;
+    var ux = 0, uy = -1, uz = 0;
+    var xx = uy * zz - uz * zy, xy = uz * zx - ux * zz, xz = ux * zy - uy * zx, xl = Math.hypot(xx, xy, xz);
+    xx /= xl; xy /= xl; xz /= xl;
+    var yx = zy * xz - zz * xy, yy = zz * xx - zx * xz, yz = zx * xy - zy * xx;
+    var view = [xx, yx, zx, 0, xy, yy, zy, 0, xz, yz, zz, 0,
+      -(xx * EYE[0] + xy * EYE[1] + xz * EYE[2]), -(yx * EYE[0] + yy * EYE[1] + yz * EYE[2]), -(zx * EYE[0] + zy * EYE[1] + zz * EYE[2]), 1];
+    var f = 1 / Math.tan(cam.fov / 2), near = 50, far = 5000, nf = 1 / (near - far), aspect = cssW / cssH;
+    var proj = [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) * nf, -1, 0, 0, 2 * far * near * nf, 0];
+    mul(proj, view, VP);
+    invert(VP, IVP);
+  }
+
+  // world -> CSS pixel coordinates of the canvas
+  var SXp = new Float32Array(N), SYp = new Float32Array(N);
+  function projectAll() {
+    var m = VP;
+    for (var i = 0; i < N; i++) {
+      var x = X[i], y = Y[i], z = Z[i];
+      var w = m[3] * x + m[7] * y + m[11] * z + m[15];
+      SXp[i] = ((m[0] * x + m[4] * y + m[8] * z + m[12]) / w + 1) * 0.5 * cssW;
+      SYp[i] = (1 - (m[1] * x + m[5] * y + m[9] * z + m[13]) / w) * 0.5 * cssH;
+    }
+  }
+  function projectPoint(x, y, z) {
+    var m = VP, w = m[3] * x + m[7] * y + m[11] * z + m[15];
+    return [((m[0] * x + m[4] * y + m[8] * z + m[12]) / w + 1) * 0.5 * cssW, (1 - (m[1] * x + m[5] * y + m[9] * z + m[13]) / w) * 0.5 * cssH];
+  }
+  // ray through a CSS pixel, intersected with the plane facing the camera through point (px, py, pz)
+  function unprojectToPlane(sx, sy, px, py, pz) {
+    var nx = sx / cssW * 2 - 1, ny = 1 - sy / cssH * 2, m = IVP;
+    function un(z) {
+      var x = m[0] * nx + m[4] * ny + m[8] * z + m[12], y = m[1] * nx + m[5] * ny + m[9] * z + m[13];
+      var zz = m[2] * nx + m[6] * ny + m[10] * z + m[14], w = m[3] * nx + m[7] * ny + m[11] * z + m[15];
+      return [x / w, y / w, zz / w];
+    }
+    var a = un(-1), b = un(1), d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    var den = d[0] * FWD[0] + d[1] * FWD[1] + d[2] * FWD[2];
+    var t = ((px - a[0]) * FWD[0] + (py - a[1]) * FWD[1] + (pz - a[2]) * FWD[2]) / den;
+    return [a[0] + d[0] * t, a[1] + d[1] * t, a[2] + d[2] * t];
+  }
+
+  /* ---------- Shaders ---------- */
+  function compile(type, src) {
+    var sh = gl.createShader(type); gl.shaderSource(sh, src); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+    return sh;
+  }
+  function program(vs, fs) {
+    var p = gl.createProgram();
+    gl.attachShader(p, compile(gl.VERTEX_SHADER, vs)); gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    var info = { p: p, a: {}, u: {} }, i, n;
+    n = gl.getProgramParameter(p, gl.ACTIVE_ATTRIBUTES);
+    for (i = 0; i < n; i++) { var at = gl.getActiveAttrib(p, i); info.a[at.name] = gl.getAttribLocation(p, at.name); }
+    n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+    for (i = 0; i < n; i++) { var un = gl.getActiveUniform(p, i); info.u[un.name] = gl.getUniformLocation(p, un.name); }
+    return info;
+  }
+
+  // Fabric: two-sided lighting from per-vertex normals, wrap-around diffuse, fill light,
+  // grazing-angle sheen and a faint woven texture. Also draws the flattened floor shadow.
+  var surfaceProg = program([
+    'attribute vec3 aPos; attribute vec3 aNor; attribute vec2 aUv; attribute float aStress; varying float vStress;',
+    'uniform mat4 uVP; uniform float uFlatten; uniform float uFloor;',
+    'varying vec3 vNor; varying vec2 vUv; varying vec3 vPos;',
+    'void main() {',
+    '  vec3 p = aPos;',
+    '  if (uFlatten > 0.5) p.y = uFloor;',
+    '  vPos = p; vNor = aNor; vUv = aUv; vStress = aStress;',
+    '  gl_Position = uVP * vec4(p, 1.0);',
+    '}'].join('\n'), [
+    'precision mediump float;',
+    'varying vec3 vNor; varying vec2 vUv; varying vec3 vPos;',
+    'uniform vec3 uEye; uniform vec3 uKey; uniform vec3 uFill; uniform float uShadow;',
+    'uniform vec3 uFront; uniform vec3 uBack; uniform vec2 uGrid; uniform vec3 uHot; varying float vStress;',
+    'void main() {',
+    '  if (uShadow > 0.5) { gl_FragColor = vec4(0.05, 0.06, 0.08, 0.11); return; }',
+    '  vec3 n = normalize(vNor);',
+    '  vec3 v = normalize(uEye - vPos);',
+    '  float facing = dot(n, v);',
+    '  vec3 base = mix(facing >= 0.0 ? uFront : uBack, uHot, smoothstep(1.1, 2.4, vStress));',   // same strain scale as the springs
+    '  if (facing < 0.0) n = -n;',                                  // light whichever side we see
+    '  float key = clamp((dot(n, uKey) + 0.35) / 1.35, 0.0, 1.0);',   // wrap lighting: soft like fabric
+    '  float fill = max(dot(n, uFill), 0.0);',
+    '  float sheen = pow(1.0 - clamp(abs(facing), 0.0, 1.0), 3.0);', // fibres catch light at grazing angles
+    '  vec2 g = vUv * uGrid * 3.14159265 * 4.0;',
+    '  float weave = 0.965 + 0.035 * sin(g.x) * sin(g.y);',
+    '  vec3 col = base * weave * (0.40 + 0.56 * key + 0.14 * fill) + vec3(0.14) * sheen;',
+    '  gl_FragColor = vec4(col, 1.0);',
+    '}'].join('\n'));
+
+  // Springs, floor grid and pins share one simple shader. Strain tints springs toward orange.
+  var lineProg = program([
+    'attribute vec3 aPos; attribute float aStrain;',
+    'uniform mat4 uVP; uniform vec3 uEye; uniform float uPull; uniform float uPointSize;',
+    'varying float vStrain;',
+    'void main() {',
+    '  vStrain = aStrain;',
+    '  vec3 p = aPos + normalize(uEye - aPos) * uPull;',            // nudge toward the camera by a fixed world distance:
+    '  gl_Position = uVP * vec4(p, 1.0);',                            // enough to sit on their own surface, far less than the gap between layers
+    '  gl_PointSize = uPointSize;',
+    '}'].join('\n'), [
+    'precision mediump float;',
+    'varying float vStrain;',
+    'uniform vec4 uColor; uniform vec4 uHot; uniform float uRound;',
+    'void main() {',
+    '  if (uRound > 0.5 && length(gl_PointCoord - 0.5) > 0.5) discard;',
+    '  float t = smoothstep(1.1, 2.4, vStrain);',                    // vStrain is length^2 / rest^2
+    '  gl_FragColor = mix(uColor, uHot, t);',
+    '}'].join('\n'));
+
+  /* ---------- Buffers ---------- */
+  var posData = new Float32Array(N * 3), norData = new Float32Array(N * 3), uvData = new Float32Array(N * 2);
+  for (var r0 = 0; r0 < ROWS; r0++) for (var c0 = 0; c0 < COLS; c0++) {
+    uvData[(r0 * COLS + c0) * 2] = c0 / (COLS - 1); uvData[(r0 * COLS + c0) * 2 + 1] = r0 / (ROWS - 1);
+  }
+  var idxData = new Uint16Array(NC * 6), idxCount = 0, builtTopology = -1;
+  var lineData = [new Float32Array(MAX_SPRINGS * 8), new Float32Array(MAX_SPRINGS * 8), new Float32Array(MAX_SPRINGS * 8)];
+  var lineCount = [0, 0, 0];
+  var pinData = new Float32Array(N * 4), pinCount = 0;
+  var stressData = new Float32Array(N);
+
+  var bufPos = gl.createBuffer(), bufNor = gl.createBuffer(), bufUv = gl.createBuffer(), bufIdx = gl.createBuffer();
+  var bufLines = [gl.createBuffer(), gl.createBuffer(), gl.createBuffer()], bufPins = gl.createBuffer(), bufFloor = gl.createBuffer(), bufStress = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufUv); gl.bufferData(gl.ARRAY_BUFFER, uvData, gl.STATIC_DRAW);
+
+  var floorVerts = [], fx, fz;
+  for (fx = -400; fx <= 1400; fx += 50) floorVerts.push(fx, FLOOR, -500, 1, fx, FLOOR, 900, 1);
+  for (fz = -500; fz <= 900; fz += 50) floorVerts.push(-400, FLOOR, fz, 1, 1400, FLOOR, fz, 1);
+  var floorCount = floorVerts.length / 4;
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufFloor); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(floorVerts), gl.STATIC_DRAW);
+
+  function rebuildIndices() {
+    // a cell is drawn only while all four of its structural edges are intact
+    idxCount = 0;
+    for (var r = 0; r < ROWS - 1; r++) for (var c = 0; c < COLS - 1; c++) {
+      if (!EDGE[hEdge(r, c)] || !EDGE[hEdge(r + 1, c)] || !EDGE[vEdge(r, c)] || !EDGE[vEdge(r, c + 1)]) continue;
+      var i = r * COLS + c;
+      idxData[idxCount++] = i; idxData[idxCount++] = i + 1; idxData[idxCount++] = i + COLS + 1;
+      idxData[idxCount++] = i; idxData[idxCount++] = i + COLS + 1; idxData[idxCount++] = i + COLS;
+    }
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufIdx);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idxData.subarray(0, idxCount), gl.DYNAMIC_DRAW);
+    builtTopology = topology;
+  }
+
+  /* ---------- Drawing ---------- */
+  var RX = new Float64Array(N), RY = new Float64Array(N), RZ = new Float64Array(N);
+  function attrib(prog, name, buf, size, stride, offset) {
+    var loc = prog.a[name];
+    if (loc === undefined) return;
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, size, gl.FLOAT, false, stride || 0, offset || 0);
+  }
+  function disableAttribs(prog) { for (var k in prog.a) gl.disableVertexAttribArray(prog.a[k]); }
+
+  function draw(alpha) {
+    var i, r, c, s;
+    // interpolate between the last two physics steps
+    for (i = 0; i < N; i++) {
+      RX[i] = PX[i] + (X[i] - PX[i]) * alpha;
+      RY[i] = PY[i] + (Y[i] - PY[i]) * alpha;
+      RZ[i] = PZ[i] + (Z[i] - PZ[i]) * alpha;
+      posData[i * 3] = RX[i]; posData[i * 3 + 1] = RY[i]; posData[i * 3 + 2] = RZ[i];
+    }
+
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clearStencil(0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL);
+    gl.enable(gl.BLEND); gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+
+    // floor grid
+    gl.useProgram(lineProg.p);
+    gl.uniformMatrix4fv(lineProg.u.uVP, false, VP);
+    gl.uniform3f(lineProg.u.uEye, EYE[0], EYE[1], EYE[2]); gl.uniform1f(lineProg.u.uPull, 0); gl.uniform1f(lineProg.u.uPointSize, 1); gl.uniform1f(lineProg.u.uRound, 0);
+    gl.uniform4f(lineProg.u.uColor, 0.05, 0.06, 0.08, 0.07); gl.uniform4f(lineProg.u.uHot, 0.05, 0.06, 0.08, 0.07);
+    attrib(lineProg, 'aPos', bufFloor, 3, 16, 0); attrib(lineProg, 'aStrain', bufFloor, 1, 16, 12);
+    gl.depthMask(false);
+    gl.drawArrays(gl.LINES, 0, floorCount);
+    gl.depthMask(true);
+    disableAttribs(lineProg);
+
+    if (builtTopology !== topology) rebuildIndices();
+
+    if (showSurface && idxCount) {
+      // per-vertex normals from the neighbouring points (central differences)
+      for (r = 0; r < ROWS; r++) for (c = 0; c < COLS; c++) {
+        i = r * COLS + c;
+        var l = c > 0 ? i - 1 : i, rt = c < COLS - 1 ? i + 1 : i, u = r > 0 ? i - COLS : i, d = r < ROWS - 1 ? i + COLS : i;
+        var ax = RX[rt] - RX[l], ay = RY[rt] - RY[l], az = RZ[rt] - RZ[l];
+        var bx = RX[d] - RX[u], by = RY[d] - RY[u], bz = RZ[d] - RZ[u];
+        var nx = by * az - bz * ay, ny = bz * ax - bx * az, nz = bx * ay - by * ax;   // down x right: faces the viewer when hanging
+        var nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+        norData[i * 3] = nx / nl; norData[i * 3 + 1] = ny / nl; norData[i * 3 + 2] = nz / nl;
+      }
+      // per-vertex stress: the most-stretched structural spring touching each point, as length^2 / rest^2
+      stressData.fill(1);
+      for (s = 0; s < M; s++) {
+        if (KIND[s] !== KIND_STRUCT) continue;
+        var sa = SA[s], sb = SB[s], ex = RX[sb] - RX[sa], ey = RY[sb] - RY[sa], ez = RZ[sb] - RZ[sa];
+        var st = (ex * ex + ey * ey + ez * ez) / RR[s];
+        if (st > stressData[sa]) stressData[sa] = st;
+        if (st > stressData[sb]) stressData[sb] = st;
+      }
+      gl.bindBuffer(gl.ARRAY_BUFFER, bufStress); gl.bufferData(gl.ARRAY_BUFFER, stressData, gl.DYNAMIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, bufPos); gl.bufferData(gl.ARRAY_BUFFER, posData, gl.DYNAMIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, bufNor); gl.bufferData(gl.ARRAY_BUFFER, norData, gl.DYNAMIC_DRAW);
+
+      gl.useProgram(surfaceProg.p);
+      gl.uniformMatrix4fv(surfaceProg.u.uVP, false, VP);
+      gl.uniform3f(surfaceProg.u.uEye, EYE[0], EYE[1], EYE[2]);
+      gl.uniform3f(surfaceProg.u.uKey, -0.36, -0.55, -0.75);      // up-left and in front of the cloth (y is down)
+      gl.uniform3f(surfaceProg.u.uFill, 0.6, -0.2, 0.77);         // from behind-right
+      gl.uniform3f(surfaceProg.u.uFront, 0.93, 0.935, 0.95);      // paper white
+      gl.uniform3f(surfaceProg.u.uBack, 0.55, 0.58, 0.64);         // slate, so stress orange reads on both sides
+      gl.uniform3f(surfaceProg.u.uHot, 1.0, 0.30, 0.07);           // the springs' strained colour
+      gl.uniform2f(surfaceProg.u.uGrid, COLS - 1, ROWS - 1);
+      gl.uniform1f(surfaceProg.u.uFloor, FLOOR - 0.5);
+      attrib(surfaceProg, 'aPos', bufPos, 3); attrib(surfaceProg, 'aNor', bufNor, 3); attrib(surfaceProg, 'aUv', bufUv, 2); attrib(surfaceProg, 'aStress', bufStress, 1);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufIdx);
+
+      // soft shadow: the mesh flattened onto the floor, each pixel darkened once (stencil)
+      gl.uniform1f(surfaceProg.u.uShadow, 1); gl.uniform1f(surfaceProg.u.uFlatten, 1);
+      gl.enable(gl.STENCIL_TEST); gl.stencilFunc(gl.EQUAL, 0, 0xff); gl.stencilOp(gl.KEEP, gl.KEEP, gl.INCR);
+      gl.depthMask(false);
+      gl.drawElements(gl.TRIANGLES, idxCount, gl.UNSIGNED_SHORT, 0);
+      gl.depthMask(true);
+      gl.disable(gl.STENCIL_TEST);
+
+      // the fabric itself (the springs are nudged toward the camera in their shader, so they draw on top of it)
+      gl.uniform1f(surfaceProg.u.uShadow, 0); gl.uniform1f(surfaceProg.u.uFlatten, 0);
+      gl.drawElements(gl.TRIANGLES, idxCount, gl.UNSIGNED_SHORT, 0);
+      disableAttribs(surfaceProg);
+    }
+
+    // springs: one vertex buffer per kind, each vertex carries the spring's squared strain
+    if (showSprings || showHidden) {
+      lineCount[0] = lineCount[1] = lineCount[2] = 0;
+      for (s = 0; s < M; s++) {
+        var kd = KIND[s];
+        if (kd === KIND_STRUCT ? !showSprings : !showHidden) continue;
+        var a = SA[s], b = SB[s];
+        var dx = RX[b] - RX[a], dy = RY[b] - RY[a], dz = RZ[b] - RZ[a];
+        var strain = (dx * dx + dy * dy + dz * dz) / RR[s];
+        var arr = lineData[kd], o = lineCount[kd] * 8;
+        arr[o] = RX[a]; arr[o + 1] = RY[a]; arr[o + 2] = RZ[a]; arr[o + 3] = strain;
+        arr[o + 4] = RX[b]; arr[o + 5] = RY[b]; arr[o + 6] = RZ[b]; arr[o + 7] = strain;
+        lineCount[kd]++;
+      }
+      gl.useProgram(lineProg.p);
+      gl.uniformMatrix4fv(lineProg.u.uVP, false, VP);
+      gl.uniform3f(lineProg.u.uEye, EYE[0], EYE[1], EYE[2]); gl.uniform1f(lineProg.u.uPull, 1.5); gl.uniform1f(lineProg.u.uRound, 0);
+      var colors = [
+        [0.05, 0.06, 0.08, showSurface ? 0.55 : 0.8, 1.0, 0.30, 0.07, 1.0],   // structural: ink, hot = orange
+        [0.36, 0.38, 0.44, 0.45, 0.36, 0.38, 0.44, 0.45],                     // shear: muted grey
+        [0.76, 0.23, 0.02, 0.5, 0.76, 0.23, 0.02, 0.5]                        // bend: deep orange
+      ];
+      for (var k = 2; k >= 0; k--) {
+        if (!lineCount[k]) continue;
+        var col = colors[k];
+        gl.uniform4f(lineProg.u.uColor, col[0], col[1], col[2], col[3]);
+        gl.uniform4f(lineProg.u.uHot, col[4], col[5], col[6], col[7]);
+        gl.bindBuffer(gl.ARRAY_BUFFER, bufLines[k]);
+        gl.bufferData(gl.ARRAY_BUFFER, lineData[k].subarray(0, lineCount[k] * 8), gl.DYNAMIC_DRAW);
+        attrib(lineProg, 'aPos', bufLines[k], 3, 16, 0); attrib(lineProg, 'aStrain', bufLines[k], 1, 16, 12);
+        gl.drawArrays(gl.LINES, 0, lineCount[k] * 2);
+      }
+      disableAttribs(lineProg);
+    }
+
+    // pins
+    pinCount = 0;
+    for (i = 0; i < N; i++) if (PIN[i]) { var po = pinCount * 4; pinData[po] = RX[i]; pinData[po + 1] = RY[i]; pinData[po + 2] = RZ[i]; pinData[po + 3] = 1; pinCount++; }
+    if (pinCount) {
+      gl.useProgram(lineProg.p);
+      gl.uniform3f(lineProg.u.uEye, EYE[0], EYE[1], EYE[2]); gl.uniform1f(lineProg.u.uPull, 3); gl.uniform1f(lineProg.u.uPointSize, 7 * dpr); gl.uniform1f(lineProg.u.uRound, 1);
+      gl.uniform4f(lineProg.u.uColor, 0.05, 0.06, 0.08, 1); gl.uniform4f(lineProg.u.uHot, 0.05, 0.06, 0.08, 1);
+      gl.bindBuffer(gl.ARRAY_BUFFER, bufPins); gl.bufferData(gl.ARRAY_BUFFER, pinData.subarray(0, pinCount * 4), gl.DYNAMIC_DRAW);
+      attrib(lineProg, 'aPos', bufPins, 3, 16, 0); attrib(lineProg, 'aStrain', bufPins, 1, 16, 12);
+      gl.drawArrays(gl.POINTS, 0, pinCount);
+      disableAttribs(lineProg);
+    }
+
+    drawOverlay();
+  }
+
+  // 2D overlay for the pointer feedback (hover ring, cut brush)
+  function drawOverlay() {
+    octx.setTransform(1, 0, 0, 1, 0, 0);
+    octx.clearRect(0, 0, overlay.width, overlay.height);
+    octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    var focus = grabbed >= 0 ? grabbed : (mode === 'grab' && pointer.inside && !pointer.down ? hover : -1);
+    if (focus >= 0) {
+      var p = projectPoint(RX[focus], RY[focus], RZ[focus]);
+      // the grab patch: a soft disc the size of GRAB_RADIUS on screen, plus a ring on the held point
+      var e = projectPoint(RX[focus] + GRAB_RADIUS, RY[focus], RZ[focus]), pr = Math.hypot(e[0] - p[0], e[1] - p[1]);
+      octx.fillStyle = grabbed >= 0 ? 'rgba(255,77,18,0.16)' : 'rgba(255,77,18,0.09)';
+      octx.beginPath(); octx.arc(p[0], p[1], pr, 0, 6.2832); octx.fill();
+      octx.strokeStyle = '#FF4D12'; octx.lineWidth = 2;
+      octx.beginPath(); octx.arc(p[0], p[1], grabbed >= 0 ? 7 : 5, 0, 6.2832); octx.stroke();
+    }
+    if (pointer.cutting && pointer.inside) {
+      octx.fillStyle = 'rgba(255,77,18,0.18)';
+      octx.beginPath(); octx.arc(pointer.x, pointer.y, 10, 0, 6.2832); octx.fill();
+    }
+  }
+
+  /* ---------- Sizing ---------- */
+  function resize() {
+    var rect = canvas.getBoundingClientRect();
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cssW = Math.max(1, rect.width); cssH = Math.max(1, rect.height);
+    canvas.width = overlay.width = Math.round(cssW * dpr);
+    canvas.height = overlay.height = Math.round(cssH * dpr);
+    updateCamera();
+    dirty = true;
+  }
+
+  /* ---------- Pointer interaction (all in CSS pixels of the canvas) ---------- */
+  function local(e) { var rect = canvas.getBoundingClientRect(); return [e.clientX - rect.left, e.clientY - rect.top]; }
+  function nearestPoint(sx, sy) {
+    projectAll();
+    var best = -1, bestD = GRAB_RADIUS_PX * GRAB_RADIUS_PX;
+    for (var i = 0; i < N; i++) {
+      var dx = SXp[i] - sx, dy = SYp[i] - sy, d = dx * dx + dy * dy;
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  }
+  function segIntersect(p1x, p1y, p2x, p2y, p3x, p3y, p4x, p4y) {
+    var d = (p2x - p1x) * (p4y - p3y) - (p2y - p1y) * (p4x - p3x);
+    if (d === 0) return false;
+    var t = ((p3x - p1x) * (p4y - p3y) - (p3y - p1y) * (p4x - p3x)) / d;
+    var u = ((p3x - p1x) * (p2y - p1y) - (p3y - p1y) * (p2x - p1x)) / d;
+    return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+  }
+  function cutAlong(x1, y1, x2, y2) {
+    projectAll();
+    var edges = [], changed = false;
+    for (var s = 0; s < M; s++) {
+      var a = SA[s], b = SB[s];
+      var mx = (SXp[a] + SXp[b]) / 2 - x2, my = (SYp[a] + SYp[b]) / 2 - y2;
+      if (mx * mx + my * my < 49 || segIntersect(x1, y1, x2, y2, SXp[a], SYp[a], SXp[b], SYp[b])) {
+        if (KIND[s] === KIND_STRUCT) edges.push(REF1[s]);
+        else { removeSpring(s); s--; changed = true; }
+      }
+    }
+    for (var i = 0; i < edges.length; i++) breakEdge(edges[i]);
+    if (edges.length || changed) wake();
+  }
+  function updateCursor() {
+    canvas.classList.toggle('cut', mode === 'cut' || pointer.cutting);
+    canvas.classList.toggle('dragging', grabbed >= 0 || pointer.orbiting);
+  }
+
+  canvas.addEventListener('pointerdown', function (e) {
+    var p = local(e);
+    pointer.x = p[0]; pointer.y = p[1]; pointer.vx = pointer.vy = pointer.vz = 0; pointer.t = e.timeStamp;
+    pointer.down = true; pointer.inside = true;
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+    pointer.cutting = mode === 'cut' || e.button === 2 || e.shiftKey;
+    if (pointer.cutting) cutAlong(p[0], p[1], p[0], p[1]);
+    else {
+      grabbed = nearestPoint(p[0], p[1]);
+      if (grabbed >= 0) {
+        INV[grabbed] = 0;
+        grabArea(grabbed);
+        target.x = pointer.wx = X[grabbed]; target.y = pointer.wy = Y[grabbed]; target.z = pointer.wz = Z[grabbed];
+      } else pointer.orbiting = true;              // empty space: orbit the camera
+    }
+    wake(); updateCursor();
+    e.preventDefault();
+  });
+  canvas.addEventListener('pointermove', function (e) {
+    var p = local(e), dx = p[0] - pointer.x, dy = p[1] - pointer.y;
+    pointer.inside = true;
+    if (pointer.down) {
+      if (pointer.cutting) cutAlong(pointer.x, pointer.y, p[0], p[1]);
+      else if (pointer.orbiting) {
+        cam.yaw -= dx * 0.0035;
+        cam.pitch = Math.max(-0.05, Math.min(1.1, cam.pitch + dy * 0.003));
+        updateCamera();
+      } else if (grabbed >= 0) {
+        // drag within the plane that faces the camera and passes through the held point
+        var w = unprojectToPlane(p[0], p[1], target.x, target.y, target.z);
+        var dt = Math.max(e.timeStamp - pointer.t, 1) / 1000;
+        pointer.vx = pointer.vx * 0.6 + (w[0] - target.x) / dt * 0.4;
+        pointer.vy = pointer.vy * 0.6 + (w[1] - target.y) / dt * 0.4;
+        pointer.vz = pointer.vz * 0.6 + (w[2] - target.z) / dt * 0.4;
+        target.x = w[0]; target.y = w[1]; target.z = w[2];
+      }
+      dirty = true;
+    } else if (mode === 'grab') {
+      var h = nearestPoint(p[0], p[1]);
+      if (h !== hover) { hover = h; dirty = true; }
+    }
+    pointer.t = e.timeStamp;
+    pointer.x = p[0]; pointer.y = p[1];
+  });
+  function release() {
+    if (grabbed >= 0) {
+      var g = grabbed;
+      if (PIN[g]) { PX[g] = X[g]; PY[g] = Y[g]; PZ[g] = Z[g]; }
+      else {
+        // carry the pointer's velocity into the cloth so it can be thrown
+        var cl = function (v) { return Math.max(-4000, Math.min(4000, v)); };
+        PX[g] = X[g] - cl(pointer.vx) * STEP; PY[g] = Y[g] - cl(pointer.vy) * STEP; PZ[g] = Z[g] - cl(pointer.vz) * STEP;
+        INV[g] = 1;
+      }
+    }
+    grabbed = -1; grabCount = 0; pointer.down = false; pointer.cutting = false; pointer.orbiting = false;
+    wake(); updateCursor();
+  }
+  canvas.addEventListener('pointerup', release);
+  canvas.addEventListener('pointercancel', release);
+  canvas.addEventListener('pointerleave', function () { if (!pointer.down) { pointer.inside = false; hover = -1; dirty = true; } });
+  canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  canvas.addEventListener('dblclick', function (e) {
+    var p = local(e), i = nearestPoint(p[0], p[1]);
+    if (i < 0) return;
+    PIN[i] = PIN[i] ? 0 : 1;
+    INV[i] = PIN[i] ? 0 : 1;
+    PX[i] = X[i]; PY[i] = Y[i]; PZ[i] = Z[i];
+    wake();
+  });
+
+  /* ---------- Controls ---------- */
+  function byId(id) { return document.getElementById(id); }
+  var bGrab = byId('modeGrab'), bCut = byId('modeCut');
+  function setMode(m) {
+    mode = m;
+    bGrab.setAttribute('aria-pressed', String(m === 'grab'));
+    bCut.setAttribute('aria-pressed', String(m === 'cut'));
+    hover = -1; dirty = true; updateCursor();
+  }
+  function toggler(id, get, set, wakeSim) {
+    var b = byId(id);
+    function flip() { set(!get()); b.setAttribute('aria-pressed', String(get())); if (wakeSim) wake(); else dirty = true; }
+    b.addEventListener('click', flip);
+    return flip;
+  }
+  var toggleWind = toggler('wind', function () { return wind; }, function (v) { wind = v; }, true);
+  var toggleTear = toggler('tear', function () { return tearing; }, function (v) { tearing = v; }, false);
+  var toggleSelf = toggler('selfc', function () { return selfCollide; }, function (v) { selfCollide = v; }, true);
+  toggler('surface', function () { return showSurface; }, function (v) { showSurface = v; }, false);
+  toggler('springs', function () { return showSprings; }, function (v) { showSprings = v; }, false);
+  toggler('hidden', function () { return showHidden; }, function (v) { showHidden = v; }, false);
+  bGrab.addEventListener('click', function () { setMode('grab'); });
+  bCut.addEventListener('click', function () { setMode('cut'); });
+  byId('reset').addEventListener('click', function () { build(); homeCamera(); wake(); });
+  document.addEventListener('keydown', function (e) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    var tag = (e.target && e.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    var k = e.key.toLowerCase();
+    if (k === 'g') setMode('grab');
+    else if (k === 'c') setMode('cut');
+    else if (k === 'w') toggleWind();
+    else if (k === 't') toggleTear();
+    else if (k === 's') toggleSelf();
+    else if (k === 'r') { build(); homeCamera(); wake(); }
+  });
+
+  /* ---------- Loop ---------- */
+  var sPoints = byId('sPoints'), sLinks = byId('sLinks'), sFps = byId('sFps'), sMs = byId('sMs');
+  var acc = 0, last = performance.now(), frames = 0, fpsT = last, visible = true;
+  var simMs = 0, drawMs = 0, worked = 0;
+  if ('IntersectionObserver' in window) new IntersectionObserver(function (en) { visible = en[0].isIntersecting; }).observe(canvas);
+
+  function frame(now) {
+    var dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+    frames++;
+    if (visible && !document.hidden) {
+      var t0 = performance.now(), n = 0, motion = 0;
+      if (!asleep) {
+        acc += dt;
+        // catch up at most 4 steps or ~8 ms per frame; if still behind, drop the leftover time (brief slow
+        // motion) instead of letting heavy frames demand ever more steps and freeze the page
+        while (acc >= STEP && n < 4 && performance.now() - t0 < 8) { motion = Math.max(motion, step(STEP)); acc -= STEP; n++; }
+        if (acc >= STEP) acc = 0;
+        // idle the solver once the cloth has settled and nobody is touching it
+        if (n > 0) {
+          if (!wind && grabbed < 0 && !pointer.down && motion < SLEEP_MOTION) { if (++still > SLEEP_FRAMES) asleep = true; }
+          else still = 0;
+        }
+      }
+      var t1 = performance.now();
+      if (!asleep || dirty) {
+        draw(asleep ? 1 : acc / STEP);
+        dirty = false;
+        var t2 = performance.now();
+        simMs += t1 - t0; drawMs += t2 - t1; worked++;
+      }
+    }
+    if (now - fpsT > 500) {
+      sPoints.textContent = N;
+      sLinks.textContent = M;
+      if (asleep) { sFps.textContent = '—'; sMs.textContent = 'idle'; sMs.title = 'Cloth has settled; the solver is paused until you touch it.'; }
+      else if (worked) {
+        var msPerFrame = (simMs + drawMs) / worked;
+        sMs.textContent = msPerFrame.toFixed(2);
+        // theoretical frame rate if only our own CPU work limited it (display refresh normally caps it)
+        sFps.textContent = Math.round(1000 / Math.max(msPerFrame, 0.01)).toLocaleString("en-US");
+        sMs.title = 'physics ' + (simMs / worked).toFixed(3) + ' ms + drawing ' + (drawMs / worked).toFixed(3) + ' ms per frame';
+      }
+      frames = 0; fpsT = now; simMs = drawMs = 0; worked = 0;
+    }
+    requestAnimationFrame(frame);
+  }
+
+  build();
+  resize();
+  if ('ResizeObserver' in window) new ResizeObserver(resize).observe(canvas);
+  else window.addEventListener('resize', resize);
+  requestAnimationFrame(frame);
+})();
