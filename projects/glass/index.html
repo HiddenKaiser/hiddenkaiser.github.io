@@ -77,6 +77,10 @@ button { font: inherit; color: inherit; }
 .reset:hover { background: var(--accent); border-color: var(--accent); }
 .stats { display: flex; gap: 14px; font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); }
 .stats b { color: var(--ink); font-weight: 500; }
+.stats { flex-wrap: wrap; } .stats > span { white-space: nowrap; }
+/* fixed-width, right-aligned numbers: the readout never changes size, so the panel never shifts */
+.stats b { display: inline-block; text-align: right; }
+#sShards { min-width: 5ch; } #sFalling { min-width: 4ch; } #sFps { min-width: 6ch; } #sMs { min-width: 5ch; }
 
 .stage { position: relative; background: #000; }
 #glass { display: block; width: 100%; aspect-ratio: 1000 / 640; max-height: max(280px, calc(79vh - 165px)); touch-action: manipulation; cursor: crosshair; user-select: none; -webkit-user-select: none; }
