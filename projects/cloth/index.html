@@ -632,12 +632,12 @@ footer a:hover { color: var(--ink); }
   // Springs, floor grid and pins share one simple shader. Strain tints springs toward orange.
   var lineProg = program([
     'attribute vec3 aPos; attribute float aStrain;',
-    'uniform mat4 uVP; uniform float uBias; uniform float uPointSize;',
+    'uniform mat4 uVP; uniform vec3 uEye; uniform float uPull; uniform float uPointSize;',
     'varying float vStrain;',
     'void main() {',
     '  vStrain = aStrain;',
-    '  gl_Position = uVP * vec4(aPos, 1.0);',
-    '  gl_Position.z -= uBias * gl_Position.w;',                     // pull lines just in front of the surface
+    '  vec3 p = aPos + normalize(uEye - aPos) * uPull;',            // nudge toward the camera by a fixed world distance:
+    '  gl_Position = uVP * vec4(p, 1.0);',                            // enough to sit on their own surface, far less than the gap between layers
     '  gl_PointSize = uPointSize;',
     '}'].join('\n'), [
     'precision mediump float;',
@@ -715,7 +715,7 @@ footer a:hover { color: var(--ink); }
     // floor grid
     gl.useProgram(lineProg.p);
     gl.uniformMatrix4fv(lineProg.u.uVP, false, VP);
-    gl.uniform1f(lineProg.u.uBias, 0); gl.uniform1f(lineProg.u.uPointSize, 1); gl.uniform1f(lineProg.u.uRound, 0);
+    gl.uniform3f(lineProg.u.uEye, EYE[0], EYE[1], EYE[2]); gl.uniform1f(lineProg.u.uPull, 0); gl.uniform1f(lineProg.u.uPointSize, 1); gl.uniform1f(lineProg.u.uRound, 0);
     gl.uniform4f(lineProg.u.uColor, 0.05, 0.06, 0.08, 0.07); gl.uniform4f(lineProg.u.uHot, 0.05, 0.06, 0.08, 0.07);
     attrib(lineProg, 'aPos', bufFloor, 3, 16, 0); attrib(lineProg, 'aStrain', bufFloor, 1, 16, 12);
     gl.depthMask(false);
@@ -770,11 +770,9 @@ footer a:hover { color: var(--ink); }
       gl.depthMask(true);
       gl.disable(gl.STENCIL_TEST);
 
-      // the fabric itself, pushed back slightly so the springs draw on top of it
+      // the fabric itself (the springs are nudged toward the camera in their shader, so they draw on top of it)
       gl.uniform1f(surfaceProg.u.uShadow, 0); gl.uniform1f(surfaceProg.u.uFlatten, 0);
-      gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(1, 1);
       gl.drawElements(gl.TRIANGLES, idxCount, gl.UNSIGNED_SHORT, 0);
-      gl.disable(gl.POLYGON_OFFSET_FILL);
       disableAttribs(surfaceProg);
     }
 
@@ -794,7 +792,7 @@ footer a:hover { color: var(--ink); }
       }
       gl.useProgram(lineProg.p);
       gl.uniformMatrix4fv(lineProg.u.uVP, false, VP);
-      gl.uniform1f(lineProg.u.uBias, 0.0004); gl.uniform1f(lineProg.u.uRound, 0);
+      gl.uniform3f(lineProg.u.uEye, EYE[0], EYE[1], EYE[2]); gl.uniform1f(lineProg.u.uPull, 1.5); gl.uniform1f(lineProg.u.uRound, 0);
       var colors = [
         [0.05, 0.06, 0.08, showSurface ? 0.55 : 0.8, 1.0, 0.30, 0.07, 1.0],   // structural: ink, hot = orange
         [0.36, 0.38, 0.44, 0.45, 0.36, 0.38, 0.44, 0.45],                     // shear: muted grey
@@ -818,7 +816,7 @@ footer a:hover { color: var(--ink); }
     for (i = 0; i < N; i++) if (PIN[i]) { var po = pinCount * 4; pinData[po] = RX[i]; pinData[po + 1] = RY[i]; pinData[po + 2] = RZ[i]; pinData[po + 3] = 1; pinCount++; }
     if (pinCount) {
       gl.useProgram(lineProg.p);
-      gl.uniform1f(lineProg.u.uBias, 0.001); gl.uniform1f(lineProg.u.uPointSize, 7 * dpr); gl.uniform1f(lineProg.u.uRound, 1);
+      gl.uniform3f(lineProg.u.uEye, EYE[0], EYE[1], EYE[2]); gl.uniform1f(lineProg.u.uPull, 3); gl.uniform1f(lineProg.u.uPointSize, 7 * dpr); gl.uniform1f(lineProg.u.uRound, 1);
       gl.uniform4f(lineProg.u.uColor, 0.05, 0.06, 0.08, 1); gl.uniform4f(lineProg.u.uHot, 0.05, 0.06, 0.08, 1);
       gl.bindBuffer(gl.ARRAY_BUFFER, bufPins); gl.bufferData(gl.ARRAY_BUFFER, pinData.subarray(0, pinCount * 4), gl.DYNAMIC_DRAW);
       attrib(lineProg, 'aPos', bufPins, 3, 16, 0); attrib(lineProg, 'aStrain', bufPins, 1, 16, 12);
