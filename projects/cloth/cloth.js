@@ -707,7 +707,7 @@
     // one pass over the springs: stress (the most-stretched structural spring touching each point, as
     // length^2 / rest^2) and the line vertices, one buffer per kind, each vertex carrying the spring's strain
     lineCount[0] = lineCount[1] = lineCount[2] = 0;
-    var wantStress = showSurface, wantStruct = showSprings, wantHidden = showHidden;
+    var wantStress = showSurface, wantStruct = showSprings, wantHidden = showSprings && showHidden;   // "Show Lines" hides every kind
     if (wantStress || wantStruct || wantHidden) {
       var ST = stressData, L0 = lineData[0], L1 = lineData[1], L2 = lineData[2], n0 = 0, n1 = 0, n2 = 0;
       for (s = 0; s < M; s++) {
