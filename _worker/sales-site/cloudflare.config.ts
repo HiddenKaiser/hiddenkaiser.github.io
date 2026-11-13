@@ -1,6 +1,7 @@
 import { defineConfig } from "cf/config";
 
-// sales.jackkeuler.com: a small Worker that serves the _sales/ folder of this repo (see src/index.js).
+// sales.jackkeuler.com: a small Worker that serves the _sales/ folder of this repo, plus the projects pages it
+// shares with jackkeuler.com (see src/index.js).
 export default defineConfig({
   worker: {
     name: "sales-jackkeuler",

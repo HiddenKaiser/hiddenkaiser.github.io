@@ -1,14 +1,23 @@
 # Jack Keuler · Portfolio
 
-Personal portfolio and resume site for Jack Keuler, Sales Engineer.
+Personal portfolio and resume sites for Jack Keuler:
 
-It's a static site with no build step: one `index.html` file holds the pages, styles and scripts. The only outside resource it loads is Google Fonts.
+- **jackkeuler.com**: Senior Software Engineer portfolio, published by GitHub Pages from the repo root.
+- **sales.jackkeuler.com**: Sales Engineer portfolio, served by a Cloudflare Worker from `_sales/` (see `_worker/sales-site/README.md`).
+
+Both are static sites with no build step. The only outside resource they load is Google Fonts.
 
 | File | What it is |
 | --- | --- |
-| `index.html` | The whole site: the portfolio page plus the resume page at `#resume` |
+| `index.html` | jackkeuler.com: the portfolio page plus the resume page at `#resume` |
+| `resume/index.html` | Shareable `/resume/` link with its own link preview; sends visitors to `/#resume` |
+| `projects/` | Projects page and interactive demos, **shared by both sites** (root-relative links lead back to whichever host served them) |
+| `_sales/` | sales.jackkeuler.com pages: `index.html`, `resume/`, link previews, robots and sitemap |
+| `_archive/` | Retired sites, not served anywhere |
+| `_worker/sales-site/` | The Cloudflare Worker behind sales.jackkeuler.com |
 | `favicon.svg` | Browser tab icon |
-| `.nojekyll` | Tells GitHub Pages to serve the files as they are, without running Jekyll |
+
+Don't add a `.nojekyll` file: GitHub Pages' Jekyll step is what keeps the underscore folders (`_sales/`, `_archive/`, `_worker/`) off jackkeuler.com.
 
 ## Publish on GitHub Pages
 

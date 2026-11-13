@@ -6,6 +6,12 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "http.server", "8123"],
       "port": 8123
+    },
+    {
+      "name": "sales-site",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["_worker/sales-site/preview.py", "8124"],
+      "port": 8124
     }
   ]
 }

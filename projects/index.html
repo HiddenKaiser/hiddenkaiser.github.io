@@ -69,6 +69,12 @@ a { color: inherit; }
 .head h1 { margin-top: 16px; font-size: clamp(3rem, 9vw, 7rem); font-variation-settings: "wdth" 75, "opsz" 96; font-weight: 800; letter-spacing: -0.045em; line-height: .88; }
 .head h1 .dot { color: var(--accent); }
 .head p { margin-top: 18px; max-width: 58ch; color: var(--muted); font-size: 1.1rem; }
+.gh { margin-top: 22px; display: inline-flex; align-items: center; gap: 10px; padding: 11px 18px; border-radius: 999px; background: var(--ink); color: var(--paper); text-decoration: none; font-family: var(--mono); font-size: 14px; transition: background .25s, transform .25s var(--ease); }
+.gh:hover { background: var(--accent-deep); transform: translateY(-2px); }
+.gh svg:last-child { transition: transform .25s var(--ease); }
+.gh:hover svg:last-child { transform: translateX(2px); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+@media (max-width: 520px) { .nav-gh { display: none; } }
 
 /* Grid */
 .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; padding-bottom: clamp(64px, 9vw, 112px); }
@@ -125,6 +131,7 @@ footer a:hover { color: var(--ink); }
     <nav class="nav-links" aria-label="Primary">
       <a class="nav-link" href="/">Portfolio</a>
       <a class="nav-link" href="/projects/" aria-current="page">Projects</a>
+      <a class="nav-link nav-gh" href="https://github.com/hiddenkaiser" target="_blank" rel="noopener">GitHub ↗<span class="sr"> (opens in a new tab)</span></a>
       <a class="nav-cta" href="/#resume">Resume</a>
     </nav>
   </div>
@@ -136,6 +143,12 @@ footer a:hover { color: var(--ink); }
       <span class="tag-line">Engineering</span>
       <h1>Projects<span class="dot">.</span></h1>
       <p>Simulations, procedural geometry and performance work from my engineering career, mostly in Luau where every millisecond of a 60 fps frame budget counts.</p>
+      <a class="gh" href="https://github.com/hiddenkaiser" target="_blank" rel="noopener">
+        <svg width="18" height="18" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span>github.com/hiddenkaiser</span>
+        <span class="sr"> (opens in a new tab)</span>
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </a>
     </div>
   </section>
 
@@ -211,7 +224,7 @@ footer a:hover { color: var(--ink); }
 
 <footer>
   <div class="wrap">
-    <span>© 2026 Jack Keuler</span>
+    <span>© 2026 Jack Keuler · <a href="https://github.com/hiddenkaiser" target="_blank" rel="noopener">GitHub</a></span>
     <a href="/">Back to the portfolio</a>
   </div>
 </footer>
