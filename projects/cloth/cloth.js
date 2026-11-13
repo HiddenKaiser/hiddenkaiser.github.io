@@ -44,6 +44,8 @@
   var M = 0;                                     // live springs, dense in [0, M)
   var topology = 0;                              // bumps whenever the mesh changes
   var CELLDEAD;                                  // 1 once any of a grid cell's four structural edges has broken
+  var DIAG;                                      // per cell, its two shear diagonals: [cell*2] top-left to bottom-right,
+                                                 // [cell*2+1] top-right to bottom-left; 1 while that spring is intact
   var needSweep = false;                         // edges were broken; their springs still need removing (sweepSprings)
   var geomVersion = 0;                           // bumps whenever point positions may have changed (renderer caches on it)
   var pinsVersion = 0;                           // bumps whenever the set of pinned points changes
@@ -85,6 +87,7 @@
     REF1 = new Int32Array(MAX_SPRINGS); REF2 = new Int32Array(MAX_SPRINGS);
     EDGE = new Uint8Array(NE);
     CELLDEAD = new Uint8Array(NC);
+    DIAG = new Uint8Array(NC * 2);
     M = 0;
     GI = new Int32Array(N); GW = new Float64Array(N); GOX = new Float64Array(N); GOY = new Float64Array(N); GOZ = new Float64Array(N);
     grabbed = -1; grabCount = 0;
@@ -178,15 +181,15 @@
     }
     for (r = 0; r < ROWS - 1; r++) for (c = 0; c < COLS - 1; c++) {
       i = r * COLS + c;
-      addSpring(i, i + COLS + 1, KIND_SHEAR, cellId(r, c), -1);
-      addSpring(i + 1, i + COLS, KIND_SHEAR, cellId(r, c), -1);
+      addSpring(i, i + COLS + 1, KIND_SHEAR, cellId(r, c), 0);   // REF2: which of the cell's diagonals (DIAG)
+      addSpring(i + 1, i + COLS, KIND_SHEAR, cellId(r, c), 1);
     }
     for (r = 0; r < ROWS; r++) for (c = 0; c < COLS; c++) {
       i = r * COLS + c;
       if (c < COLS - 2) addSpring(i, i + 2, KIND_BEND, hEdge(r, c), hEdge(r, c + 1));
       if (r < ROWS - 2) addSpring(i, i + 2 * COLS, KIND_BEND, vEdge(r, c), vEdge(r + 1, c));
     }
-    CELLDEAD.fill(0); needSweep = false;
+    CELLDEAD.fill(0); DIAG.fill(1); needSweep = false;
     grabbed = -1; grabCount = 0; topology++; geomVersion++; pinsVersion++;
   }
 
@@ -195,10 +198,10 @@
     SA[s] = SA[M]; SB[s] = SB[M]; RR[s] = RR[M]; KIND[s] = KIND[M]; REF1[s] = REF1[M]; REF2[s] = REF2[M];
   }
 
-  // Breaking a structural edge also drops the shear springs of the cells beside it and the
-  // bend springs spanning it, so the fabric really separates instead of hanging on hidden springs.
-  // breakEdge only marks the edge and its cells; sweepSprings then removes every affected spring in one
-  // pass, so tearing or cutting k edges at once costs one O(M) sweep instead of k of them.
+  // Breaking a structural edge also drops the bend springs spanning it, and settleCell() decides which shear
+  // diagonals of the cells beside it survive, so the fabric really separates instead of hanging on hidden
+  // springs. breakEdge only marks the edge and its cells; sweepSprings then settles those cells and removes
+  // every affected spring in one pass, so tearing or cutting k edges at once costs one O(M) sweep.
   function breakEdge(e) {
     if (!EDGE[e]) return;
     EDGE[e] = 0; needSweep = true; topology++;
@@ -206,10 +209,32 @@
     if (e < HE) { r = (e / (COLS - 1)) | 0; c = e % (COLS - 1); if (r > 0) CELLDEAD[cellId(r - 1, c)] = 1; if (r < ROWS - 1) CELLDEAD[cellId(r, c)] = 1; }
     else { k = e - HE; r = (k / COLS) | 0; c = k % COLS; if (c > 0) CELLDEAD[cellId(r, c - 1)] = 1; if (c < COLS - 1) CELLDEAD[cellId(r, c)] = 1; }
   }
+  // A damaged cell keeps at most one triangle: a corner whose two structural edges and the diagonal facing it
+  // (joining its two neighbours) are all intact. That is what lets a cut leave a smooth diagonal edge across a
+  // cell instead of a missing square. Settling a damaged cell drops any diagonal no triangle can use, and if
+  // both diagonals are still there (a tear, or a cut that ended inside the cell) drops the more stretched one,
+  // the way the cloth would give.
+  function cellEdges(r, c) {   // bit 1 top, 2 right, 4 bottom, 8 left: set while intact
+    return (EDGE[hEdge(r, c)] ? 1 : 0) | (EDGE[vEdge(r, c + 1)] ? 2 : 0) | (EDGE[hEdge(r + 1, c)] ? 4 : 0) | (EDGE[vEdge(r, c)] ? 8 : 0);
+  }
+  function settleCell(r, c) {
+    var cell = cellId(r, c), m = cellEdges(r, c), d0 = cell * 2, d1 = d0 + 1;
+    if (m === 15) return;
+    if (DIAG[d0] && DIAG[d1]) {
+      var i = r * COLS + c, j = i + COLS + 1, p = i + 1, q = i + COLS;
+      var ax = X[j] - X[i], ay = Y[j] - Y[i], az = Z[j] - Z[i], bx = X[q] - X[p], by = Y[q] - Y[p], bz = Z[q] - Z[p];
+      if (ax * ax + ay * ay + az * az > bx * bx + by * by + bz * bz) DIAG[d0] = 0; else DIAG[d1] = 0;
+    }
+    // diagonal 0 (top-left to bottom-right) serves the top-right corner (top + right) and bottom-left (bottom + left);
+    // diagonal 1 serves the top-left corner (top + left) and bottom-right (right + bottom)
+    if (DIAG[d0] && (m & 3) !== 3 && (m & 12) !== 12) DIAG[d0] = 0;
+    if (DIAG[d1] && (m & 9) !== 9 && (m & 6) !== 6) DIAG[d1] = 0;
+  }
   function sweepSprings() {
+    for (var r = 0; r < ROWS - 1; r++) for (var c = 0; c < COLS - 1; c++) if (CELLDEAD[cellId(r, c)]) settleCell(r, c);
     for (var s = M - 1; s >= 0; s--) {   // backwards, so the spring swapped into s has already been checked
       var kd = KIND[s];
-      if (kd === KIND_STRUCT ? !EDGE[REF1[s]] : kd === KIND_SHEAR ? CELLDEAD[REF1[s]] : (!EDGE[REF1[s]] || !EDGE[REF2[s]])) removeSpring(s);
+      if (kd === KIND_STRUCT ? !EDGE[REF1[s]] : kd === KIND_SHEAR ? !DIAG[REF1[s] * 2 + REF2[s]] : (!EDGE[REF1[s]] || !EDGE[REF2[s]])) removeSpring(s);
     }
     needSweep = false; topology++;
   }
@@ -585,11 +610,38 @@
     '  gl_FragColor = mix(uColor, uHot, t);',
     '}'].join('\n'));
 
+  // Cloth outline: each boundary edge drawn as a thin strip a fixed number of pixels wide (WebGL lines are
+  // only ever 1 device pixel). Every vertex knows its own end and the other end of its edge; it is pushed
+  // sideways (aSide = +-1) and a little past its end, so neighbouring strips overlap at the corners.
+  // Depth-tested and nudged toward the camera like the springs: an edge in front of other cloth is drawn over
+  // it, and one behind cloth is hidden.
+  var outlineProg = program([
+    'attribute vec3 aPos; attribute vec3 aOther; attribute float aSide;',
+    'uniform mat4 uVP; uniform vec3 uEye; uniform float uPull; uniform vec2 uViewport; uniform float uWidth;',
+    'void main() {',
+    '  vec4 a = uVP * vec4(aPos + normalize(uEye - aPos) * uPull, 1.0);',
+    '  vec4 b = uVP * vec4(aOther + normalize(uEye - aOther) * uPull, 1.0);',
+    '  vec2 hv = uViewport * 0.5;',
+    '  vec2 d = a.xy / a.w * hv - b.xy / b.w * hv;',                // from the other end to this one, in pixels
+    '  float len = length(d);',
+    '  d = len > 0.0001 ? d / len : vec2(1.0, 0.0);',
+    '  vec2 off = (vec2(-d.y, d.x) * aSide + d) * uWidth * 0.5;',
+    '  a.xy += off / hv * a.w;',
+    '  gl_Position = a;',
+    '}'].join('\n'), [
+    'precision mediump float;',
+    'uniform vec4 uColor;',
+    'void main() { gl_FragColor = uColor; }'].join('\n'));
+  var OUTLINE_WIDTH = 1.5;   // CSS pixels
+  var OUTLINE_FLOATS = 7;    // per vertex: own end xyz, other end xyz, side
+
   /* ---------- Buffers ---------- */
   // Every array draw() touches is allocated in allocRender(), once per density, and the GPU buffers are sized
   // there too. A frame only fills those arrays and copies them in with bufferSubData, so drawing allocates
   // nothing in JS and never makes the driver reallocate GPU storage.
   var posData, norData, uvData, stressData, idxData, pinIdx, lineData;
+  var OA, OB, outlineData, outlineCount = 0;   // boundary edges (point pairs) and their strip vertices
+  var ECOUNT, DCOUNT;                          // drawn triangles using each structural edge / diagonal
   var idxCount = 0, pinCount = 0, lineCount = new Int32Array(3);
   var builtTopology = -1, builtPins = -1;
   // what the cached geometry (positions, normals, stress, spring lines) was built from; see draw()
@@ -598,6 +650,7 @@
   var bufPos = gl.createBuffer(), bufNor = gl.createBuffer(), bufUv = gl.createBuffer(), bufStress = gl.createBuffer();
   var bufIdx = gl.createBuffer(), bufPinIdx = gl.createBuffer(), bufFloor = gl.createBuffer();
   var bufLines = [gl.createBuffer(), gl.createBuffer(), gl.createBuffer()];
+  var bufOutline = gl.createBuffer();
 
   function reserve(target, buf, bytes) { gl.bindBuffer(target, buf); gl.bufferData(target, bytes, gl.DYNAMIC_DRAW); }
   // Copy the first `len` elements of `data` into `buf`. WebGL 2 copies exactly that range; WebGL 1 has no
@@ -620,7 +673,11 @@
     var cap = [NE, 2 * NC, MAX_SPRINGS - NE - 2 * NC];
     lineData = [new Float32Array(cap[0] * 8), new Float32Array(cap[1] * 8), new Float32Array(cap[2] * 8)];
     SXp = new Float32Array(N); SYp = new Float32Array(N);
-    idxCount = pinCount = 0; lineCount.fill(0);
+    // at most every structural edge and diagonal is a boundary; 6 vertices (two triangles) each
+    var maxOutline = NE + 2 * NC;
+    OA = new Int32Array(maxOutline); OB = new Int32Array(maxOutline); outlineData = new Float32Array(maxOutline * 6 * OUTLINE_FLOATS);
+    ECOUNT = new Uint8Array(NE); DCOUNT = new Uint8Array(NC * 2);
+    idxCount = pinCount = outlineCount = 0; lineCount.fill(0);
     builtTopology = builtPins = drawnGeom = drawnTopo = drawnFlags = -1; drawnAlpha = -1;
 
     gl.bindBuffer(gl.ARRAY_BUFFER, bufUv); gl.bufferData(gl.ARRAY_BUFFER, uvData, gl.STATIC_DRAW);
@@ -630,6 +687,7 @@
     for (var k = 0; k < 3; k++) reserve(gl.ARRAY_BUFFER, bufLines[k], lineData[k].byteLength);
     reserve(gl.ELEMENT_ARRAY_BUFFER, bufIdx, idxData.byteLength);
     reserve(gl.ELEMENT_ARRAY_BUFFER, bufPinIdx, pinIdx.byteLength);
+    reserve(gl.ARRAY_BUFFER, bufOutline, outlineData.byteLength);
   }
   allocRender();
 
@@ -640,17 +698,44 @@
   gl.bindBuffer(gl.ARRAY_BUFFER, bufFloor); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(floorVerts), gl.STATIC_DRAW);
   floorVerts = null;
 
-  // triangles: a cell is drawn only while all four of its structural edges are intact
+  // Triangles: an intact cell is drawn whole; a damaged one as the single corner triangle it still has (see
+  // settleCell), so cut edges can run diagonally across cells. Every triangle also counts how many drawn
+  // triangles use each structural edge (ECOUNT) and each diagonal (DCOUNT), for the outline.
+  function tri(a, b, c) { idxData[idxCount++] = a; idxData[idxCount++] = b; idxData[idxCount++] = c; }
   function rebuildIndices() {
-    idxCount = 0;
+    idxCount = 0; ECOUNT.fill(0); DCOUNT.fill(0);
     for (var r = 0; r < ROWS - 1; r++) for (var c = 0; c < COLS - 1; c++) {
-      if (CELLDEAD[cellId(r, c)]) continue;
-      var i = r * COLS + c;
-      idxData[idxCount++] = i; idxData[idxCount++] = i + 1; idxData[idxCount++] = i + COLS + 1;
-      idxData[idxCount++] = i; idxData[idxCount++] = i + COLS + 1; idxData[idxCount++] = i + COLS;
+      var i = r * COLS + c, tl = i, tr = i + 1, bl = i + COLS, br = i + COLS + 1;
+      var top = hEdge(r, c), rgt = vEdge(r, c + 1), bot = hEdge(r + 1, c), lft = vEdge(r, c);
+      var d0 = cellId(r, c) * 2, d1 = d0 + 1, m = cellEdges(r, c);
+      if (m === 15) {
+        ECOUNT[top]++; ECOUNT[rgt]++; ECOUNT[bot]++; ECOUNT[lft]++;
+        if (DIAG[d0] || !DIAG[d1]) { tri(tl, tr, br); tri(tl, br, bl); DCOUNT[d0] += 2; }   // split along a diagonal
+        else { tri(tl, tr, bl); tri(tr, br, bl); DCOUNT[d1] += 2; }                            // that is still there
+      }
+      else if ((m & 3) === 3 && DIAG[d0]) { tri(tl, tr, br); ECOUNT[top]++; ECOUNT[rgt]++; DCOUNT[d0]++; }    // top-right corner
+      else if ((m & 12) === 12 && DIAG[d0]) { tri(tl, br, bl); ECOUNT[bot]++; ECOUNT[lft]++; DCOUNT[d0]++; }  // bottom-left
+      else if ((m & 9) === 9 && DIAG[d1]) { tri(tl, tr, bl); ECOUNT[top]++; ECOUNT[lft]++; DCOUNT[d1]++; }    // top-left
+      else if ((m & 6) === 6 && DIAG[d1]) { tri(tr, br, bl); ECOUNT[rgt]++; ECOUNT[bot]++; DCOUNT[d1]++; }    // bottom-right
     }
     if (idxCount) upload(gl.ELEMENT_ARRAY_BUFFER, bufIdx, idxData, idxCount);
+    rebuildOutline();
     builtTopology = topology;
+  }
+  // The outline follows every edge used by exactly one drawn triangle: the cloth's border, plus the new
+  // borders along tears and cuts, diagonal ones included.
+  function rebuildOutline() {
+    outlineCount = 0;
+    for (var r = 0; r < ROWS; r++) for (var c = 0; c < COLS; c++) {
+      var i = r * COLS + c;
+      if (c < COLS - 1 && ECOUNT[hEdge(r, c)] === 1) { OA[outlineCount] = i; OB[outlineCount] = i + 1; outlineCount++; }
+      if (r < ROWS - 1 && ECOUNT[vEdge(r, c)] === 1) { OA[outlineCount] = i; OB[outlineCount] = i + COLS; outlineCount++; }
+      if (r < ROWS - 1 && c < COLS - 1) {
+        var d0 = cellId(r, c) * 2;
+        if (DCOUNT[d0] === 1) { OA[outlineCount] = i; OB[outlineCount] = i + COLS + 1; outlineCount++; }
+        if (DCOUNT[d0 + 1] === 1) { OA[outlineCount] = i + 1; OB[outlineCount] = i + COLS; outlineCount++; }
+      }
+    }
   }
   // pins are drawn straight from the position buffer through this index list, rebuilt only when pins change
   function rebuildPins() {
@@ -677,6 +762,14 @@
     new Float32Array([0.76, 0.23, 0.02, 0.5, 0.76, 0.23, 0.02, 0.5])    // bend: deep orange
   ];
 
+  // one outline vertex: this end (P offset s), the edge's other end (P offset t), and which side to push to
+  function outlineVert(OD, q, P, s, t, side) {
+    OD[q] = P[s]; OD[q + 1] = P[s + 1]; OD[q + 2] = P[s + 2];
+    OD[q + 3] = P[t]; OD[q + 4] = P[t + 1]; OD[q + 5] = P[t + 2];
+    OD[q + 6] = side;
+    return q + OUTLINE_FLOATS;
+  }
+
   // Fill and upload the per-frame geometry: interpolated positions, normals, per-point stress and the spring
   // lines. Strain is computed once per spring and feeds both the stress colouring and the lines.
   function buildGeometry(alpha) {
@@ -702,6 +795,15 @@
       }
       upload(gl.ARRAY_BUFFER, bufNor, NOR, N * 3);
       stressData.fill(1);
+
+      // outline strips: per edge a quad of 6 vertices, two at each end on either side
+      var OD = outlineData, q = 0;
+      for (var e = 0; e < outlineCount; e++) {
+        var ea = OA[e] * 3, eb = OB[e] * 3;
+        q = outlineVert(OD, q, P, ea, eb, 1); q = outlineVert(OD, q, P, ea, eb, -1); q = outlineVert(OD, q, P, eb, ea, 1);
+        q = outlineVert(OD, q, P, ea, eb, 1); q = outlineVert(OD, q, P, eb, ea, 1); q = outlineVert(OD, q, P, eb, ea, -1);
+      }
+      if (outlineCount) upload(gl.ARRAY_BUFFER, bufOutline, OD, q);
     }
 
     // one pass over the springs: stress (the most-stretched structural spring touching each point, as
@@ -767,7 +869,9 @@
       gl.uniform3f(surfaceProg.u.uFront, 0.93, 0.935, 0.95);      // paper white
       gl.uniform3f(surfaceProg.u.uBack, 0.55, 0.58, 0.64);         // slate, so stress orange reads on both sides
       gl.uniform3f(surfaceProg.u.uHot, 1.0, 0.30, 0.07);           // the springs' strained colour
-      gl.uniform2f(surfaceProg.u.uGrid, COLS - 1, ROWS - 1);
+      // weave repeats per cloth width / height, counted in density-1 cells, so the texture keeps its
+      // real-world size when the density changes the number of grid cells
+      gl.uniform2f(surfaceProg.u.uGrid, (COLS - 1) * SPACING / originalSpacing, (ROWS - 1) * SPACING / originalSpacing);
       gl.uniform1f(surfaceProg.u.uFloor, FLOOR - 0.5);
       attrib(surfaceProg, 'aPos', bufPos, 3); attrib(surfaceProg, 'aNor', bufNor, 3); attrib(surfaceProg, 'aUv', bufUv, 2); attrib(surfaceProg, 'aStress', bufStress, 1);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufIdx);
@@ -800,6 +904,22 @@
         gl.drawArrays(gl.LINES, 0, lineCount[k] * 2);
       }
       disableAttribs(lineProg);
+    }
+
+    // the fabric's outline, over its own surface and the springs along its border (outlineData is only kept
+    // up to date while the surface is shown)
+    if (showSurface && outlineCount) {
+      gl.useProgram(outlineProg.p);
+      gl.uniformMatrix4fv(outlineProg.u.uVP, false, VP);
+      gl.uniform3f(outlineProg.u.uEye, EYE[0], EYE[1], EYE[2]); gl.uniform1f(outlineProg.u.uPull, 2);
+      gl.uniform2f(outlineProg.u.uViewport, canvas.width, canvas.height);
+      gl.uniform1f(outlineProg.u.uWidth, OUTLINE_WIDTH * dpr);
+      gl.uniform4f(outlineProg.u.uColor, 0.05, 0.06, 0.08, 1);
+      var ostride = OUTLINE_FLOATS * 4;
+      attrib(outlineProg, 'aPos', bufOutline, 3, ostride, 0); attrib(outlineProg, 'aOther', bufOutline, 3, ostride, 12);
+      attrib(outlineProg, 'aSide', bufOutline, 1, ostride, 24);
+      gl.drawArrays(gl.TRIANGLES, 0, outlineCount * 6);
+      disableAttribs(outlineProg);
     }
 
     // pins: indexed straight out of the position buffer
@@ -880,11 +1000,17 @@
   function cutAlong(x1, y1, x2, y2) {
     projectAll();
     var changed = false;
+    // a click (no movement) snips the springs whose middles are within 7 px; a drag cuts exactly the springs
+    // its path crosses, so a cell clipped at one corner keeps its other half
+    var click = Math.abs(x2 - x1) + Math.abs(y2 - y1) < 0.5;
     for (var s = 0; s < M; s++) {
       var a = SA[s], b = SB[s];
       var mx = (SXp[a] + SXp[b]) / 2 - x2, my = (SYp[a] + SYp[b]) / 2 - y2;
-      if (mx * mx + my * my < 49 || segIntersect(x1, y1, x2, y2, SXp[a], SYp[a], SXp[b], SYp[b])) {
-        if (KIND[s] === KIND_STRUCT) breakEdge(REF1[s]);   // marked now, removed by the sweep below
+      if (click ? mx * mx + my * my < 49 : segIntersect(x1, y1, x2, y2, SXp[a], SYp[a], SXp[b], SYp[b])) {
+        // structural edges and diagonals are marked now and removed by the sweep below, which also works out
+        // which half of each cut cell survives; bend springs just go
+        if (KIND[s] === KIND_STRUCT) breakEdge(REF1[s]);
+        else if (KIND[s] === KIND_SHEAR) { DIAG[REF1[s] * 2 + REF2[s]] = 0; needSweep = true; }
         else { removeSpring(s); s--; }
         changed = true;
       }
@@ -904,7 +1030,7 @@
     pointer.down = true; pointer.inside = true;
     try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
     pointer.cutting = mode === 'cut' || e.button === 2 || e.shiftKey;
-    if (pointer.cutting) cutAlong(px, py, px, py);
+    if (pointer.cutting) pointer.cutMoved = false;   // a press that never moves snips on release (see release)
     else {
       grabbed = nearestPoint(px, py);
       if (grabbed >= 0) {
@@ -923,7 +1049,9 @@
     var px = LX, py = LY, dx = px - pointer.x, dy = py - pointer.y;
     pointer.inside = true;
     if (pointer.down) {
-      if (pointer.cutting) cutAlong(pointer.x, pointer.y, px, py);
+      if (pointer.cutting) {
+        if (Math.abs(dx) + Math.abs(dy) >= 0.5) { cutAlong(pointer.x, pointer.y, px, py); pointer.cutMoved = true; }
+      }
       else if (pointer.orbiting) {
         cam.yaw -= dx * 0.0035;
         cam.pitch = Math.max(-0.05, Math.min(1.1, cam.pitch + dy * 0.003));
@@ -946,8 +1074,10 @@
     pointer.x = px; pointer.y = py;
   });
   function clampSpeed(v) { return v < -4000 ? -4000 : v > 4000 ? 4000 : v; }
-  function release() {
+  function release(e) {
     var touched = grabbed >= 0 || pointer.cutting;   // orbiting never touches the cloth, so it needn't wake the solver
+    // a cut press released without moving is a click: snip what is right under it
+    if (pointer.cutting && !pointer.cutMoved && e && e.type === 'pointerup') cutAlong(pointer.x, pointer.y, pointer.x, pointer.y);
     if (grabbed >= 0) {
       var g = grabbed;
       if (PIN[g]) { PX[g] = X[g]; PY[g] = Y[g]; PZ[g] = Z[g]; }
